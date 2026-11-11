@@ -1,0 +1,20 @@
+//! The editing engine: everything that does not depend on the GUI.
+
+pub mod buffer;
+pub mod buffers;
+pub mod commands;
+pub mod cursor;
+pub mod editor;
+pub mod keymap;
+pub mod picker;
+pub mod search;
+pub mod text;
+
+#[cfg(test)]
+mod tests;
+
+pub use buffer::Buffer;
+pub use buffers::BufView;
+pub use editor::{Args, Editor, RawArg, Scroll};
+pub use keymap::{Dispatcher, Key, Keymap, Outcome};
+pub use search::{Swiper, SwiperExit};

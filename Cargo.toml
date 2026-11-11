@@ -1,0 +1,13 @@
+[package]
+name = "emax"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+ropey = "1.6.1"
+
+# Optimise dependencies (GPUI, ropey) even in debug builds so `cargo run` stays snappy;
+# our own crate keeps fast incremental compiles and full debug info.
+[profile.dev.package."*"]
+opt-level = 3
