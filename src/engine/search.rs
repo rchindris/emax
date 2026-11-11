@@ -1,4 +1,4 @@
-//! Swiper-style search (C-s / C-r): every line matching the query is listed in
+//! Swiper-style search (`swiper`, `swiper-backward`): every line matching the query is listed in
 //! a panel; moving through the list previews the match in the buffer, RET jumps
 //! there (leaving the mark where the search started), C-g goes back.
 //!
@@ -12,9 +12,27 @@ use ropey::Rope;
 
 use super::cursor::Cursor;
 use super::editor::{Editor, Scroll};
-use super::keymap::Key;
+use super::keymap::{Key, Keymap};
 
-/// How far C-v / M-v move the selection.
+/// What the search keymap can bind keys to.
+pub const SEARCH_ACTIONS: &[&str] = &[
+    "search-quit",
+    "search-accept",
+    "search-next",
+    "search-previous",
+    "search-next-or-history",
+    "search-previous-or-history",
+    "search-page-down",
+    "search-page-up",
+    "search-first",
+    "search-last",
+    "search-delete-char",
+    "search-delete-word",
+    "search-clear",
+    "search-insert-symbol",
+];
+
+/// How far search-page-down / search-page-up move the selection.
 pub const PAGE: i64 = 10;
 
 /// Lower-case a char without changing the char count (so folded and original
@@ -309,39 +327,62 @@ impl Editor {
         self.swiper_accept()
     }
 
-    /// Handle a key while the search is open.
-    pub fn swiper_key(&mut self, key: &Key) -> SwiperExit {
-        let k = key.canonical();
+    /// Handle a key while the search is open: run the action `keymap` binds
+    /// it to, or type it into the query.
+    pub fn swiper_key(&mut self, keymap: &Keymap, key: &Key) -> SwiperExit {
+        match keymap.lookup(&[key.canonical()]) {
+            Some(action) => self.swiper_action(action),
+            None => match key.insertable_text() {
+                Some(t) => {
+                    let t = t.to_string();
+                    self.swiper_insert(&t)
+                }
+                None if self.swiper.is_some() => SwiperExit::Open,
+                None => SwiperExit::Cancelled,
+            },
+        }
+    }
+
+    pub fn swiper_insert(&mut self, text: &str) -> SwiperExit {
+        let Some(s) = self.swiper.as_mut() else { return SwiperExit::Cancelled };
+        s.push_str(text);
+        self.swiper_preview();
+        SwiperExit::Open
+    }
+
+    /// Run a search action (one of `SEARCH_ACTIONS`).
+    pub fn swiper_action(&mut self, action: &str) -> SwiperExit {
         let last_search = self.last_search.clone();
         let Some(s) = self.swiper.as_mut() else { return SwiperExit::Cancelled };
-        match k.as_str() {
-            "C-g" | "ESC" => {
+        let recall = s.query.is_empty() && !last_search.is_empty();
+        match action {
+            "search-quit" => {
                 self.restore_origin();
                 self.swiper = None;
                 self.message = Some("Quit".into());
                 self.scroll = Scroll::Keep;
                 return SwiperExit::Cancelled;
             }
-            "RET" => return self.swiper_accept(),
-            // C-s / C-r with an empty query recall the previous search.
-            "C-s" | "s-f" | "s-g" if s.query.is_empty() && !last_search.is_empty() => s.push_str(&last_search),
-            "C-r" | "S-s-g" if s.query.is_empty() && !last_search.is_empty() => {
+            "search-accept" => return self.swiper_accept(),
+            // With an empty query, recall the previous search (like ivy's C-s C-s).
+            "search-next-or-history" if recall => s.push_str(&last_search),
+            "search-previous-or-history" if recall => {
                 s.backward = true;
                 s.push_str(&last_search);
             }
-            "C-s" | "C-n" | "<down>" | "TAB" | "s-f" | "s-g" => s.move_by(1),
-            "C-r" | "C-p" | "<up>" | "S-TAB" | "S-s-g" => s.move_by(-1),
-            "C-v" | "<next>" => s.move_clamped(PAGE),
-            "M-v" | "<prior>" => s.move_clamped(-PAGE),
-            "M-<" => s.selected = 0,
-            "M->" => s.selected = s.matches.len().saturating_sub(1),
-            "DEL" => s.delete_char(),
-            "M-DEL" | "C-w" => s.delete_word(),
-            "C-u" => {
+            "search-next" | "search-next-or-history" => s.move_by(1),
+            "search-previous" | "search-previous-or-history" => s.move_by(-1),
+            "search-page-down" => s.move_clamped(PAGE),
+            "search-page-up" => s.move_clamped(-PAGE),
+            "search-first" => s.selected = 0,
+            "search-last" => s.selected = s.matches.len().saturating_sub(1),
+            "search-delete-char" => s.delete_char(),
+            "search-delete-word" => s.delete_word(),
+            "search-clear" => {
                 s.query.clear();
                 s.refilter();
             }
-            "M-n" => {
+            "search-insert-symbol" => {
                 if let Some(sym) = s.symbol_at_origin() {
                     if !s.query.is_empty() && !s.query.ends_with(' ') {
                         s.query.push(' ');
@@ -349,13 +390,7 @@ impl Editor {
                     s.push_str(&sym);
                 }
             }
-            _ => {
-                if !key.ctrl && !key.meta && !key.sup {
-                    if let Some(t) = key.text.as_ref().filter(|t| !t.is_empty() && !t.chars().any(char::is_control)) {
-                        s.push_str(t);
-                    }
-                }
-            }
+            _ => {}
         }
         self.swiper_preview();
         SwiperExit::Open

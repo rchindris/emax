@@ -8,6 +8,7 @@ use ropey::Rope;
 
 use super::buffer::Buffer;
 use super::buffers::BufferSlot;
+use super::config::Settings;
 use super::picker::Picker;
 use super::search::Swiper;
 use super::commands::{self, flags, Command};
@@ -137,6 +138,12 @@ impl Editor {
             recenter_step: 0,
             quit_requested: false,
         }
+    }
+
+    /// Apply settings from the configuration.
+    pub fn apply_settings(&mut self, s: &Settings) {
+        self.fill_column = s.fill_column;
+        self.tab_width = s.tab_width.max(1);
     }
 
     // ------------------------------------------------------------- accessors

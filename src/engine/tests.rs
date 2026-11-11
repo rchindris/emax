@@ -7,6 +7,8 @@ use super::cursor::Cursor;
 struct T {
     ed: Editor,
     d: Dispatcher,
+    picker_keys: Keymap,
+    search_keys: Keymap,
 }
 
 fn t(s: &str) -> T {
@@ -25,7 +27,8 @@ fn t(s: &str) -> T {
         ed.add_cursor(Cursor::new(0, p));
     }
     ed.normalize_cursors();
-    T { ed, d: Dispatcher::new(Keymap::emacs_default()) }
+    let k = Keymaps::builtin();
+    T { ed, d: Dispatcher::new(k.global), picker_keys: k.picker, search_keys: k.search }
 }
 
 impl T {
@@ -50,9 +53,9 @@ impl T {
 
     fn key(&mut self, k: Key) {
         if self.ed.picker.is_some() {
-            self.ed.picker_key(&k);
+            self.ed.picker_key(&self.picker_keys, &k);
         } else if self.ed.swiper.is_some() {
-            self.ed.swiper_key(&k);
+            self.ed.swiper_key(&self.search_keys, &k);
         } else if let Outcome::Run(cmd, args) = self.d.dispatch(&k) {
             self.ed.execute(cmd, args);
         }

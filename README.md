@@ -65,11 +65,54 @@ shortcuts (`s-c`, `s-v`, `s-x`, `s-z`, `s-s`, `s-a`, `s-q`) also work.
 | Buffers | `C-x b` `C-x C-b` `C-x <left>` `C-x <right>` `C-x k` |
 | Files | `C-x C-s` (save), `C-x C-c` (quit) |
 
-The full binding table is in [`src/engine/keymap.rs`](src/engine/keymap.rs).
+These are the default bindings. The full set is in
+[`config/default.json`](config/default.json), and every key can be changed (see
+[Configuration](#configuration)).
+
+## Configuration
+
+Settings and key bindings come from JSON. The defaults are in
+[`config/default.json`](config/default.json), which is built into the binary
+(`emax --print-default-config` prints it). Your own file is read from the first
+of these that is set:
+
+1. `$EMAX_CONFIG`
+2. `$XDG_CONFIG_HOME/emax/config.json`
+3. `~/.config/emax/config.json`
+
+Your file only needs what you want to change. Settings replace the defaults.
+Keymap entries are added to the default keymaps and replace any binding for the
+same keys. Setting an entry to `null` removes a default binding:
+
+```json
+{
+  "editor": { "fill_column": 80, "tab_width": 2 },
+  "keymaps": {
+    "global": { "C-z": "undo", "C-x C-c": null },
+    "search": { "C-j": "search-accept" }
+  }
+}
+```
+
+| Section | What it holds |
+| --- | --- |
+| `editor.fill_column` | Column for `fill-paragraph` (default 70) |
+| `editor.tab_width` | Display width of a tab and the indent step (default 4) |
+| `keymaps.global` | Editing keys; multi-key sequences like `"C-x C-s"` work. Values are command names (`forward-char`, `swiper`, …) |
+| `keymaps.picker` | Keys while the buffer picker is open; values are `picker-*` actions |
+| `keymaps.search` | Keys while the search panel is open; values are `search-*` actions |
+
+Keys use Emacs notation: `C-` Control, `M-` Meta (Option), `S-` Shift, `s-`
+Super (Cmd), and names like `RET`, `TAB`, `DEL`, `ESC`, `SPC`, `<left>`,
+`<next>`. Mistakes such as bad JSON, unknown commands or malformed keys don't
+stop the editor. That entry (or file) is skipped, and the problem shows in the
+echo area and on stderr.
 
 ## Project layout
 
 ```
+config/
+  default.json       built-in settings and key bindings
 src/
   main.rs            app entry point: opens the file or *scratch* buffer and the window
   ui.rs              GPUI view: rendering and platform-key to Emacs-key translation
@@ -78,6 +121,7 @@ src/
     buffers.rs       multiple buffers in most-recently-used order
     cursor.rs        point, mark and mark ring for each cursor
     editor.rs        editor state: buffer, cursors, kill ring, command bookkeeping
+    config.rs        JSON configuration: settings and keymaps, user overrides
     commands.rs      interactive commands, named after their GNU Emacs counterparts
     keymap.rs        key parsing, keymaps, prefix keys and arguments, dispatcher
     search.rs        swiper-style line search (C-s)

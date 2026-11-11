@@ -5,8 +5,24 @@
 use super::buffer::Buffer;
 use super::cursor::Cursor;
 use super::editor::{Editor, Scroll};
-use super::keymap::Key;
+use super::keymap::{Key, Keymap};
 use super::picker::{Candidate, Picker};
+
+/// What the picker keymap can bind keys to.
+pub const PICKER_ACTIONS: &[&str] = &[
+    "picker-quit",
+    "picker-accept",
+    "picker-accept-input",
+    "picker-next",
+    "picker-previous",
+    "picker-page-down",
+    "picker-page-up",
+    "picker-first",
+    "picker-last",
+    "picker-delete-char",
+    "picker-delete-word",
+    "picker-kill-buffer",
+];
 
 pub struct BufferSlot {
     pub id: u64,
@@ -188,21 +204,40 @@ impl Editor {
         }
     }
 
-    /// Handle a key while the picker is open.
-    pub fn picker_key(&mut self, key: &Key) {
-        let k = key.canonical();
+    /// Handle a key while the picker is open: run the action `keymap` binds
+    /// it to, or type it into the query.
+    pub fn picker_key(&mut self, keymap: &Keymap, key: &Key) {
+        match keymap.lookup(&[key.canonical()]) {
+            Some(action) => self.picker_action(action),
+            None => {
+                if let Some(t) = key.insertable_text() {
+                    let t = t.to_string();
+                    self.picker_insert(&t);
+                }
+            }
+        }
+    }
+
+    pub fn picker_insert(&mut self, text: &str) {
         let Some(p) = self.picker.as_mut() else { return };
-        let k = k.as_str();
-        if k != "C-k" {
+        p.confirm_kill = None;
+        p.message = None;
+        p.push_str(text);
+    }
+
+    /// Run a picker action (one of `PICKER_ACTIONS`).
+    pub fn picker_action(&mut self, action: &str) {
+        let Some(p) = self.picker.as_mut() else { return };
+        if action != "picker-kill-buffer" {
             p.confirm_kill = None;
         }
         p.message = None;
-        match k {
-            "C-g" | "ESC" => {
+        match action {
+            "picker-quit" => {
                 self.picker = None;
                 self.message = Some("Quit".into());
             }
-            "RET" => {
+            "picker-accept" => {
                 if p.selected_candidate().is_some() {
                     let i = p.selected;
                     self.picker_accept(i);
@@ -213,26 +248,26 @@ impl Editor {
                 }
             }
             // Use the input literally, even if it fuzzy-matches something (like vertico's M-RET).
-            "C-j" | "M-RET" => {
+            "picker-accept-input" => {
                 let name = p.query.trim().to_string();
                 if !name.is_empty() {
                     self.picker = None;
                     self.switch_to_buffer_named(&name);
                 }
             }
-            "C-n" | "<down>" | "TAB" => p.move_by(1),
-            "C-p" | "<up>" | "S-TAB" => p.move_by(-1),
-            "C-v" | "<next>" => p.move_clamped(10),
-            "M-v" | "<prior>" => p.move_clamped(-10),
-            "M-<" => p.selected = 0,
-            "M->" => p.selected = p.matches.len().saturating_sub(1),
-            "DEL" => p.delete_char(),
-            "M-DEL" | "C-w" => p.delete_word(),
-            "C-k" => {
+            "picker-next" => p.move_by(1),
+            "picker-previous" => p.move_by(-1),
+            "picker-page-down" => p.move_clamped(10),
+            "picker-page-up" => p.move_clamped(-10),
+            "picker-first" => p.selected = 0,
+            "picker-last" => p.selected = p.matches.len().saturating_sub(1),
+            "picker-delete-char" => p.delete_char(),
+            "picker-delete-word" => p.delete_word(),
+            "picker-kill-buffer" => {
                 let Some(c) = p.selected_candidate().cloned() else { return };
                 if c.modified && p.confirm_kill != Some(c.id) {
                     p.confirm_kill = Some(c.id);
-                    p.message = Some(format!("{} has unsaved changes — C-k again to kill it", c.label));
+                    p.message = Some(format!("{} has unsaved changes — kill again to confirm", c.label));
                     return;
                 }
                 self.kill_buffer(c.id);
@@ -243,13 +278,7 @@ impl Editor {
                     p.message = Some(format!("Killed {}", c.label));
                 }
             }
-            _ => {
-                if !key.ctrl && !key.meta && !key.sup {
-                    if let Some(t) = key.text.as_ref().filter(|t| !t.is_empty() && !t.chars().any(char::is_control)) {
-                        p.push_str(t);
-                    }
-                }
-            }
+            _ => {}
         }
     }
 }

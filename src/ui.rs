@@ -17,7 +17,7 @@ use gpui::{
 
 use emax::engine::picker::Picker;
 use emax::engine::{Swiper, SwiperExit};
-use emax::engine::{BufView, Dispatcher, Editor, Key, Keymap, Outcome, Scroll, text};
+use emax::engine::{BufView, Dispatcher, Editor, Key, Keymap, Keymaps, Outcome, Scroll, text};
 
 // ------------------------------------------------------------------ theme
 
@@ -42,7 +42,6 @@ const FONT: &str = "Menlo";
 const UI_FONT: &str = ".SystemUIFont";
 const FONT_SIZE: f32 = 14.0;
 const LINE_HEIGHT: f32 = 21.0;
-const TAB_WIDTH: usize = 4;
 /// Lines longer than this are truncated on screen (prototype limitation).
 const MAX_RENDER_COLS: usize = 2000;
 const PICKER_ROWS: usize = 12;
@@ -56,6 +55,9 @@ const SWIPER_PANEL_H: f32 = (SWIPER_ROWS as f32 + 1.0) * LINE_HEIGHT + 2.0;
 pub struct EmaxView {
     ed: Editor,
     keys: Dispatcher,
+    /// Keys while the buffer picker / the search panel is open.
+    picker_keys: Keymap,
+    search_keys: Keymap,
     echo: Option<SharedString>,
     /// One scroll position per buffer, so switching back restores the view.
     scrolls: HashMap<u64, UniformListScrollHandle>,
@@ -71,11 +73,13 @@ pub struct EmaxView {
 }
 
 impl EmaxView {
-    pub fn new(ed: Editor, cx: &mut Context<Self>) -> Self {
+    pub fn new(ed: Editor, keymaps: Keymaps, cx: &mut Context<Self>) -> Self {
         let echo = ed.message.clone().map(SharedString::from);
         Self {
             ed,
-            keys: Dispatcher::new(Keymap::emacs_default()),
+            keys: Dispatcher::new(keymaps.global),
+            picker_keys: keymaps.picker,
+            search_keys: keymaps.search,
             echo,
             scrolls: HashMap::new(),
             focus: cx.focus_handle(),
@@ -100,14 +104,14 @@ impl EmaxView {
         self.key_started = Some(Instant::now());
 
         if self.ed.picker.is_some() {
-            self.ed.picker_key(&key);
+            self.ed.picker_key(&self.picker_keys, &key);
             self.after_picker();
             cx.stop_propagation();
             cx.notify();
             return;
         }
         if self.ed.swiper.is_some() {
-            let exit = self.ed.swiper_key(&key);
+            let exit = self.ed.swiper_key(&self.search_keys, &key);
             self.after_swiper(exit);
             cx.stop_propagation();
             cx.notify();
@@ -304,9 +308,19 @@ impl EmaxView {
         let query: SharedString = p.query.clone().into();
         let empty = n == 0;
         let footer_hint = if empty && !p.query.trim().is_empty() {
-            format!("↵ create buffer “{}”    C-g cancel", p.query.trim())
+            hints(&self.picker_keys, &[("picker-accept", &format!("create buffer “{}”", p.query.trim())), ("picker-quit", "cancel")])
         } else {
-            "↵ switch    C-n/C-p move    C-j create    C-k kill    C-g cancel".to_string()
+            hints(
+                &self.picker_keys,
+                &[
+                    ("picker-accept", "switch"),
+                    ("picker-next", "next"),
+                    ("picker-previous", "prev"),
+                    ("picker-accept-input", "create"),
+                    ("picker-kill-buffer", "kill"),
+                    ("picker-quit", "cancel"),
+                ],
+            )
         };
 
         let panel = div()
@@ -484,7 +498,16 @@ impl EmaxView {
                     .font_family(UI_FONT)
                     .text_size(px(12.0))
                     .text_color(rgb(DIM))
-                    .child("↵ jump    C-s/C-r next/prev    M-n symbol    C-g cancel"),
+                    .child(hints(
+                        &self.search_keys,
+                        &[
+                            ("search-accept", "jump"),
+                            ("search-next-or-history", "next"),
+                            ("search-previous-or-history", "prev"),
+                            ("search-insert-symbol", "symbol"),
+                            ("search-quit", "cancel"),
+                        ],
+                    )),
             );
 
         div()
@@ -510,6 +533,19 @@ fn query_with_caret(query: &str, caret_h: gpui::Pixels) -> impl IntoElement {
         .items_center()
         .when(!query.is_empty(), |d| d.child(div().text_color(rgb(0xffffff)).child(query.replace(' ', "\u{a0}"))))
         .child(div().w(px(2.0)).h(caret_h).bg(rgb(CURSOR)))
+}
+
+/// Footer hints like "RET jump    C-s next", using the keys currently bound to
+/// each action (actions with no key are left out).
+fn hints(keymap: &Keymap, items: &[(&str, &str)]) -> String {
+    items
+        .iter()
+        .filter_map(|(action, label)| {
+            let key = keymap.keys_for(action).into_iter().next()?;
+            Some(format!("{} {label}", if key == "RET" { "↵".to_string() } else { key }))
+        })
+        .collect::<Vec<_>>()
+        .join("    ")
 }
 
 /// A label with the fuzzy-matched characters highlighted.
@@ -582,7 +618,7 @@ enum CellKind {
 
 /// Build the styled text for one line: tabs expanded; search matches (char
 /// columns, `current` for the selected one), region and cursor cells highlighted.
-fn render_line(v: &BufView, line: usize, show_cursors: bool, matches: &[Range<usize>], current: bool) -> StyledText {
+fn render_line(v: &BufView, line: usize, tab_width: usize, show_cursors: bool, matches: &[Range<usize>], current: bool) -> StyledText {
     let r = &v.buf.rope;
     let start = r.line_to_char(line);
     let len = text::line_len(r, line);
@@ -595,7 +631,7 @@ fn render_line(v: &BufView, line: usize, show_cursors: bool, matches: &[Range<us
         offs.push(display.len());
         if ch == '\t' {
             let col = display.chars().count();
-            display.extend(std::iter::repeat_n(' ', TAB_WIDTH - col % TAB_WIDTH));
+            display.extend(std::iter::repeat_n(' ', tab_width - col % tab_width));
         } else {
             display.push(ch);
         }
@@ -731,7 +767,7 @@ impl Render for EmaxView {
                             )
                             .child({
                                 let hl = search.map(|s| s.highlights(ix)).unwrap_or_default();
-                                render_line(&v, ix, true, &hl, selected_match == Some(ix))
+                                render_line(&v, ix, this.ed.tab_width, true, &hl, selected_match == Some(ix))
                             })
                     })
                     .collect();

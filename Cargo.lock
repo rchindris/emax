@@ -1433,6 +1433,8 @@ version = "0.1.0"
 dependencies = [
  "gpui",
  "ropey",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -69,7 +69,7 @@ commands! {
     "recenter-top-bottom" => recenter_top_bottom, NO_UNDO, "Cycle the current line between center, top and bottom of the window.";
 
     // mark & region
-    "set-mark-command" => set_mark_command, NO_UNDO, "Set the mark where point is; with C-u, jump to the previous mark.";
+    "set-mark-command" => set_mark_command, NO_UNDO, "Set the mark where point is; with a prefix argument, jump to the previous mark.";
     "exchange-point-and-mark" => exchange_point_and_mark, NO_UNDO, "Put the mark where point is and point where the mark was.";
     "mark-whole-buffer" => mark_whole_buffer, NO_UNDO, "Put point at the beginning and mark at the end of the buffer.";
     "mark-word" => mark_word, NO_UNDO, "Set mark N words away from point.";
@@ -1349,7 +1349,7 @@ fn next_buffer(ed: &mut Editor, _: &Args) -> CmdResult {
 fn kill_buffer(ed: &mut Editor, _: &Args) -> CmdResult {
     let name = ed.buf.name.clone();
     if ed.buf.modified() && ed.buf.path.is_some() && ed.last_command != "kill-buffer" {
-        return Err(format!("{name} has unsaved changes; press C-x k again to kill it anyway"));
+        return Err(format!("{name} has unsaved changes; repeat the command to kill it anyway"));
     }
     let id = ed.buf_id;
     ed.kill_buffer(id);
@@ -1374,12 +1374,12 @@ fn save_buffer(ed: &mut Editor, _: &Args) -> CmdResult {
 
 fn quit(ed: &mut Editor, _: &Args) -> CmdResult {
     if ed.buf.modified() && ed.buf.path.is_some() && ed.last_command != "save-buffers-kill-terminal" {
-        return err("Buffer modified; save with C-x C-s, or press C-x C-c again to quit without saving");
+        return err("Buffer modified; save it first, or repeat the command to quit without saving");
     }
     ed.quit_requested = true;
     Ok(())
 }
 
 fn execute_extended(_: &mut Editor, _: &Args) -> CmdResult {
-    err("M-x needs the minibuffer, which is the next milestone")
+    err("execute-extended-command needs the minibuffer, which is the next milestone")
 }

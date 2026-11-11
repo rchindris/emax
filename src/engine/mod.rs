@@ -3,6 +3,7 @@
 pub mod buffer;
 pub mod buffers;
 pub mod commands;
+pub mod config;
 pub mod cursor;
 pub mod editor;
 pub mod keymap;
@@ -15,6 +16,7 @@ mod tests;
 
 pub use buffer::Buffer;
 pub use buffers::BufView;
+pub use config::{Config, Keymaps, Settings};
 pub use editor::{Args, Editor, RawArg, Scroll};
 pub use keymap::{Dispatcher, Key, Keymap, Outcome};
 pub use search::{Swiper, SwiperExit};

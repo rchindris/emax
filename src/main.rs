@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use gpui::{App, Application, Bounds, Focusable, WindowBounds, WindowOptions, prelude::*, px, size};
 
-use emax::engine::{Buffer, Editor};
+use emax::engine::{Buffer, Config, Editor, config};
 
 const SCRATCH: &str = ";; This buffer is for text that is not saved.
 ;; emax — GPU-rendered, rope-backed, Emacs keys. Option is Meta, Cmd is Super.
@@ -39,8 +39,17 @@ question mark or exclamation point.  Try M-e, M-a, M-} and M-q here.
 ";
 
 fn main() {
-    let paths: Vec<PathBuf> = std::env::args().skip(1).map(PathBuf::from).collect();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--print-default-config") {
+        print!("{}", config::DEFAULT_JSON);
+        return;
+    }
+    let paths: Vec<PathBuf> = args.iter().map(PathBuf::from).collect();
     let t_open = Instant::now();
+    let config = Config::load();
+    for w in &config.warnings {
+        eprintln!("emax: config: {w}");
+    }
     let open = |p: &PathBuf| {
         Buffer::open(p.clone()).unwrap_or_else(|e| {
             eprintln!("emax: {}: {e}", p.display());
@@ -58,22 +67,28 @@ fn main() {
             ed.add_buffer(open(p));
         }
     }
+    ed.apply_settings(&config.settings);
     let lines: usize = ed.rope().len_lines();
-    ed.message = Some(format!(
-        "{} · {} lines · {} buffer{} · loaded in {} ms",
-        ed.buf.name,
-        lines,
-        ed.buffer_count(),
-        if ed.buffer_count() == 1 { "" } else { "s" },
-        t_open.elapsed().as_millis()
-    ));
+    ed.message = Some(match config.warnings.as_slice() {
+        [] => format!(
+            "{} · {} lines · {} buffer{} · loaded in {} ms",
+            ed.buf.name,
+            lines,
+            ed.buffer_count(),
+            if ed.buffer_count() == 1 { "" } else { "s" },
+            t_open.elapsed().as_millis()
+        ),
+        [w] => format!("Config problem (entry skipped): {w}"),
+        [w, rest @ ..] => format!("Config problem (entry skipped): {w} — and {} more, see stderr", rest.len()),
+    });
+    let keymaps = config.keymaps;
 
     Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1100.0), px(760.0)), cx);
         let window = cx
             .open_window(
                 WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() },
-                |_, cx| cx.new(|cx| ui::EmaxView::new(ed, cx)),
+                |_, cx| cx.new(|cx| ui::EmaxView::new(ed, keymaps, cx)),
             )
             .unwrap();
         window

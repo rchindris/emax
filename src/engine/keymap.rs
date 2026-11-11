@@ -80,11 +80,22 @@ impl Key {
         (self.name.chars().count() == 1).then(|| self.name.clone())
     }
 
+    /// Text typing this key inserts into a query (plain printable keys only).
+    pub fn insertable_text(&self) -> Option<&str> {
+        if !self.is_plain() {
+            return None;
+        }
+        self.text.as_deref().filter(|t| !t.is_empty() && !t.chars().any(char::is_control))
+    }
+
     fn is_plain(&self) -> bool {
         !self.ctrl && !self.meta && !self.sup
     }
 }
 
+/// Key sequences (canonical Emacs notation, space-separated) to command names.
+/// Built from the JSON configuration (see `config.rs`).
+#[derive(Default)]
 pub struct Keymap {
     map: HashMap<Vec<String>, &'static str>,
     prefixes: HashSet<Vec<String>>,
@@ -113,101 +124,11 @@ impl Keymap {
         v.sort_by_key(|k| (k.len(), k.clone()));
         v
     }
-
-    pub fn emacs_default() -> Self {
-        let mut k = Self::new();
-        for (keys, cmd) in DEFAULT_BINDINGS {
-            k.bind(keys, cmd);
-        }
-        for d in 0..=9 {
-            for m in ["M-", "C-", "C-M-"] {
-                k.bind(&format!("{m}{d}"), "digit-argument");
-            }
-        }
-        for m in ["M--", "C--", "C-M--"] {
-            k.bind(m, "negative-argument");
-        }
-        k
-    }
 }
 
-const DEFAULT_BINDINGS: &[(&str, &str)] = &[
-    // motion
-    ("C-f", "forward-char"), ("<right>", "forward-char"),
-    ("C-b", "backward-char"), ("<left>", "backward-char"),
-    ("M-f", "forward-word"), ("C-<right>", "forward-word"), ("M-<right>", "forward-word"),
-    ("M-b", "backward-word"), ("C-<left>", "backward-word"), ("M-<left>", "backward-word"),
-    ("C-n", "next-line"), ("<down>", "next-line"),
-    ("C-p", "previous-line"), ("<up>", "previous-line"),
-    ("C-a", "move-beginning-of-line"), ("<home>", "move-beginning-of-line"), ("s-<left>", "move-beginning-of-line"),
-    ("C-e", "move-end-of-line"), ("<end>", "move-end-of-line"), ("s-<right>", "move-end-of-line"),
-    ("M-m", "back-to-indentation"),
-    ("M-a", "backward-sentence"), ("M-e", "forward-sentence"),
-    ("M-{", "backward-paragraph"), ("C-<up>", "backward-paragraph"),
-    ("M-}", "forward-paragraph"), ("C-<down>", "forward-paragraph"),
-    ("C-M-f", "forward-sexp"), ("C-M-<right>", "forward-sexp"),
-    ("C-M-b", "backward-sexp"), ("C-M-<left>", "backward-sexp"),
-    ("C-M-u", "backward-up-list"), ("C-M-<up>", "backward-up-list"),
-    ("C-M-d", "down-list"), ("C-M-<down>", "down-list"),
-    ("M-<", "beginning-of-buffer"), ("C-<home>", "beginning-of-buffer"), ("s-<up>", "beginning-of-buffer"),
-    ("M->", "end-of-buffer"), ("C-<end>", "end-of-buffer"), ("s-<down>", "end-of-buffer"),
-    ("C-v", "scroll-up-command"), ("<next>", "scroll-up-command"),
-    ("M-v", "scroll-down-command"), ("<prior>", "scroll-down-command"),
-    ("M-g g", "goto-line"), ("M-g M-g", "goto-line"),
-    ("C-l", "recenter-top-bottom"),
-    // mark & region
-    ("C-SPC", "set-mark-command"), ("C-@", "set-mark-command"),
-    ("C-x C-x", "exchange-point-and-mark"),
-    ("C-x h", "mark-whole-buffer"), ("s-a", "mark-whole-buffer"),
-    ("M-@", "mark-word"), ("M-h", "mark-paragraph"),
-    ("C-M-SPC", "mark-sexp"), ("C-M-@", "mark-sexp"),
-    ("C-g", "keyboard-quit"), ("ESC", "keyboard-quit"),
-    // kill & yank
-    ("C-k", "kill-line"), ("C-S-DEL", "kill-whole-line"),
-    ("C-w", "kill-region"), ("s-x", "kill-region"),
-    ("M-w", "kill-ring-save"), ("s-c", "kill-ring-save"),
-    ("M-d", "kill-word"), ("C-<delete>", "kill-word"),
-    ("M-DEL", "backward-kill-word"), ("C-DEL", "backward-kill-word"),
-    ("M-k", "kill-sentence"), ("C-x DEL", "backward-kill-sentence"),
-    ("C-M-k", "kill-sexp"), ("C-M-DEL", "backward-kill-sexp"),
-    ("M-z", "zap-to-char"),
-    ("C-y", "yank"), ("s-v", "yank"), ("M-y", "yank-pop"),
-    // deletion
-    ("C-d", "delete-char"), ("<delete>", "delete-char"),
-    ("DEL", "delete-backward-char"),
-    ("M-\\", "delete-horizontal-space"), ("M-SPC", "just-one-space"),
-    ("M-^", "delete-indentation"), ("C-x C-o", "delete-blank-lines"),
-    // insertion
-    ("RET", "newline"), ("C-j", "electric-newline-and-maybe-indent"), ("C-o", "open-line"),
-    ("TAB", "indent-for-tab-command"), ("C-x TAB", "indent-rigidly"),
-    ("C-q", "quoted-insert"),
-    // transpose & case
-    ("C-t", "transpose-chars"), ("M-t", "transpose-words"),
-    ("C-x C-t", "transpose-lines"), ("C-M-t", "transpose-sexps"),
-    ("M-u", "upcase-word"), ("M-l", "downcase-word"), ("M-c", "capitalize-word"),
-    ("C-x C-u", "upcase-region"), ("C-x C-l", "downcase-region"),
-    // filling
-    ("M-q", "fill-paragraph"), ("C-x f", "set-fill-column"),
-    // undo
-    ("C-/", "undo"), ("C-_", "undo"), ("C-x u", "undo"), ("s-z", "undo"),
-    ("C-?", "undo-redo"), ("C-M-_", "undo-redo"), ("S-s-z", "undo-redo"),
-    // multiple cursors (bindings from multiple-cursors.el's README)
-    ("C->", "mc/mark-next-like-this"), ("C-<", "mc/mark-previous-like-this"),
-    ("C-c C-<", "mc/mark-all-like-this"), ("C-c C->", "mc/skip-to-next-like-this"),
-    ("C-c C-.", "mc/unmark-next-like-this"),
-    ("C-S-c C-S-c", "mc/edit-lines"), ("s-d", "mc/mark-next-like-this"),
-    // search
-    ("C-s", "swiper"), ("s-f", "swiper"), ("C-r", "swiper-backward"),
-    // buffers
-    ("C-x b", "switch-to-buffer"), ("C-x C-b", "list-buffers"),
-    ("C-x <left>", "previous-buffer"), ("C-x <right>", "next-buffer"),
-    ("C-x k", "kill-buffer"),
-    // files & app
-    ("C-x C-s", "save-buffer"), ("s-s", "save-buffer"),
-    ("C-x C-c", "save-buffers-kill-terminal"), ("s-q", "save-buffers-kill-terminal"),
-    ("C-u", "universal-argument"),
-    ("M-x", "execute-extended-command"),
-];
+/// Commands the dispatcher handles itself (prefix arguments); they can be
+/// bound in the global keymap like any command.
+pub const PREFIX_ARG_COMMANDS: [&str; 3] = ["universal-argument", "digit-argument", "negative-argument"];
 
 /// What the view should do after a key.
 #[derive(Debug, PartialEq)]
@@ -282,7 +203,7 @@ impl Dispatcher {
         let k = key.canonical();
 
         if let Some((cmd, mut args)) = self.read_char.take() {
-            if k == "C-g" || k == "ESC" {
+            if self.keymap.lookup(std::slice::from_ref(&k)) == Some("keyboard-quit") {
                 return Outcome::Run("keyboard-quit", Args::default());
             }
             return match key.as_char() {
@@ -377,12 +298,6 @@ impl Dispatcher {
     }
 }
 
-impl Default for Keymap {
-    fn default() -> Self {
-        Self::emacs_default()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,7 +316,7 @@ mod tests {
 
     #[test]
     fn sequences_and_args() {
-        let mut d = Dispatcher::new(Keymap::emacs_default());
+        let mut d = Dispatcher::new(super::super::config::Keymaps::builtin().global);
         assert!(matches!(run(&mut d, "C-x C-s"), Outcome::Run("save-buffer", _)));
         assert!(matches!(d.dispatch(&key("C-x")), Outcome::Pending(ref s) if s == "C-x-"));
         assert!(matches!(d.dispatch(&key("C-z")), Outcome::Undefined(ref s) if s == "C-x C-z"));
@@ -420,7 +335,7 @@ mod tests {
 
     #[test]
     fn shift_translation_and_read_char() {
-        let mut d = Dispatcher::new(Keymap::emacs_default());
+        let mut d = Dispatcher::new(super::super::config::Keymaps::builtin().global);
         let Outcome::Run(c, a) = run(&mut d, "S-<right>") else { panic!() };
         assert_eq!((c, a.shift), ("forward-char", true));
         let Outcome::Run(c, a) = run(&mut d, "S-a") else { panic!() };
@@ -428,15 +343,5 @@ mod tests {
         assert!(matches!(run(&mut d, "M-z"), Outcome::Pending(_)));
         let Outcome::Run(c, a) = run(&mut d, "e") else { panic!() };
         assert_eq!((c, a.text.as_deref()), ("zap-to-char", Some("e")));
-    }
-
-    #[test]
-    fn every_binding_names_a_real_command() {
-        for (_, cmd) in DEFAULT_BINDINGS {
-            assert!(
-                commands::lookup(cmd).is_some() || ["universal-argument"].contains(cmd),
-                "unbound command {cmd}"
-            );
-        }
     }
 }
