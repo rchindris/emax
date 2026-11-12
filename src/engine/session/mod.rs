@@ -123,12 +123,17 @@ fn socket_path_in(env: Env, configured: Option<&Path>, tmp: &Path) -> PathBuf {
 
 /// Where session state is kept: `$EMAX_STATE_DIR`, else `configured`
 /// (`session.state_dir`), else `$XDG_STATE_HOME/emax`, else
-/// `~/.local/state/emax`.
+/// on Windows `%LOCALAPPDATA%\emax`, else `~/.local/state/emax`.
 pub fn state_dir(configured: Option<&Path>) -> Option<PathBuf> {
-    state_dir_in(&process_env, configured)
+    state_dir_for(&process_env, configured, cfg!(windows))
 }
 
+#[cfg(test)]
 fn state_dir_in(env: Env, configured: Option<&Path>) -> Option<PathBuf> {
+    state_dir_for(env, configured, false)
+}
+
+fn state_dir_for(env: Env, configured: Option<&Path>, windows: bool) -> Option<PathBuf> {
     if let Some(p) = env_path(env, "EMAX_STATE_DIR") {
         return Some(p);
     }
@@ -137,6 +142,7 @@ fn state_dir_in(env: Env, configured: Option<&Path>) -> Option<PathBuf> {
     }
     env_path(env, "XDG_STATE_HOME")
         .map(|p| p.join("emax"))
+        .or_else(|| if windows { env_path(env, "LOCALAPPDATA").map(|p| p.join("emax")) } else { None })
         .or_else(|| env_path(env, "HOME").map(|h| h.join(".local").join("state").join("emax")))
 }
 
@@ -587,6 +593,9 @@ mod tests {
         let home = env_of(&[("XDG_STATE_HOME", ""), ("HOME", "/home/u")]);
         assert_eq!(state_dir_in(&home, None), Some(PathBuf::from("/home/u/.local/state/emax")), "then ~/.local/state");
         assert_eq!(state_dir_in(&env_of(&[]), None), None);
+        let windows = env_of(&[("LOCALAPPDATA", "C:/Local"), ("HOME", "/home/u")]);
+        assert_eq!(state_dir_for(&windows, None, true), Some(PathBuf::from("C:/Local/emax")), "Windows: LOCALAPPDATA");
+        assert_eq!(state_dir_for(&windows, None, false), Some(PathBuf::from("/home/u/.local/state/emax")));
         assert_eq!(session_file_path(Path::new("/s")), PathBuf::from("/s/session.json"));
     }
 

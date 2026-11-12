@@ -33,7 +33,7 @@ pub(crate) mod testutil;
 pub use buffer::{Buffer, BufferId, BufferKind};
 pub use buffers::BufView;
 pub use config::{Appearance, Config, Keymaps, PtyBackendKind, SessionConfig, Settings, TerminalConfig};
-pub use editor::{Args, Editor, RawArg, Scroll};
+pub use editor::{Args, Editor, RawArg, Scroll, ThemeRequest};
 pub use hooks::{Event, EventKind, HookFn, Hooks, TimerId};
 pub use keymap::{Dispatcher, Key, Keymap, Outcome, where_is};
 pub use modes::{BufferModes, MinorMode, Modes};

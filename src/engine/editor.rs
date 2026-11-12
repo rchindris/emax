@@ -74,6 +74,16 @@ pub enum Scroll {
     Keep,
 }
 
+/// What load-theme asks the view to show.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ThemeRequest {
+    /// The theme with this name, whatever the system appearance.
+    Named(String),
+    /// The theme(s) from the configuration again (following the system
+    /// appearance if it names a light and a dark theme).
+    Configured,
+}
+
 pub const KILL_RING_MAX: usize = 120;
 
 pub struct Editor {
@@ -111,6 +121,12 @@ pub struct Editor {
     pub pending_command: Option<(&'static str, Args)>,
     /// Commands run from M-x, most recent first.
     pub command_history: Vec<&'static str>,
+    /// Every theme defined, as (name, is dark), for load-theme. Set by `main`.
+    pub themes: Vec<(String, bool)>,
+    /// The theme on screen, kept up to date by the view.
+    pub active_theme: String,
+    /// A theme chosen in load-theme, for the view to switch to.
+    pub theme_request: Option<ThemeRequest>,
     pub last_command: &'static str,
     pub this_command: &'static str,
     /// Text to publish to the system clipboard (set on kill/copy).
@@ -179,6 +195,9 @@ impl Editor {
             modes,
             pending_command: None,
             command_history: Vec::new(),
+            themes: Vec::new(),
+            active_theme: String::new(),
+            theme_request: None,
             last_command: "",
             this_command: "",
             clipboard_out: None,

@@ -22,6 +22,7 @@
     "family": "monospace",
     "ui_family": "system-ui",
     "size": 14,
+    "ui_size": null,
     "line_height": 1.5
   },
   "theme": "emax-dark",

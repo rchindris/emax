@@ -29,7 +29,9 @@ use emax::engine::dired::Face;
 use emax::engine::picker::{Picker, PickerKind};
 use emax::engine::term::Palette;
 use emax::engine::window::{Rect, WindowId, compute_rects};
-use emax::engine::{Appearance, Args, BufView, Dispatcher, Editor, Key, Keymap, Keymaps, Outcome, Scroll, Theme, text};
+use emax::engine::{
+    Appearance, Args, BufView, Dispatcher, Editor, Key, Keymap, Keymaps, Outcome, Scroll, Theme, ThemeRequest, text,
+};
 use emax::engine::{Swiper, SwiperExit};
 
 // ------------------------------------------------------------------ layout
@@ -72,6 +74,8 @@ pub struct EmaxView {
     appearance: Appearance,
     /// Whether the window has a dark appearance (picks the dark theme).
     dark: bool,
+    /// The theme chosen with load-theme, overriding the configured one.
+    theme_override: Option<String>,
     /// Wakes the view when the next hook timer is due (dropping it cancels).
     timer_task: Option<Task<()>>,
     /// The deadline `timer_task` waits for.
@@ -143,6 +147,7 @@ impl EmaxView {
             swiper_scroll: None,
             appearance,
             dark: is_dark(window.appearance()),
+            theme_override: None,
             timer_task: None,
             timer_deadline: None,
             cell_w,
@@ -187,8 +192,25 @@ impl EmaxView {
         self.ed.picker.is_some() || self.ed.swiper.is_some() || self.ed.settings.is_some()
     }
 
+    /// The theme to draw with: the one selected in an open load-theme picker
+    /// (live preview), else the active one.
     fn theme(&self) -> &Theme {
-        self.appearance.themes.get(self.dark)
+        match self.ed.theme_preview() {
+            Some(ThemeRequest::Named(name)) => {
+                self.appearance.theme_named(&name).unwrap_or_else(|| self.active_theme())
+            }
+            Some(ThemeRequest::Configured) => self.appearance.themes.get(self.dark),
+            None => self.active_theme(),
+        }
+    }
+
+    /// The theme loaded with load-theme, else the configured one for the
+    /// system's light/dark appearance.
+    fn active_theme(&self) -> &Theme {
+        self.theme_override
+            .as_deref()
+            .and_then(|name| self.appearance.theme_named(name))
+            .unwrap_or_else(|| self.appearance.themes.get(self.dark))
     }
 
     fn line_height(&self) -> f32 {
@@ -197,7 +219,7 @@ impl EmaxView {
 
     /// How much larger than the design size the UI is drawn.
     fn ui_scale(&self) -> f32 {
-        self.appearance.fonts.size / DESIGN_FONT_SIZE
+        self.appearance.fonts.ui_size / DESIGN_FONT_SIZE
     }
 
     /// A size in the panels, given at the design font size.
@@ -386,6 +408,11 @@ impl EmaxView {
                 self.apply_scroll();
             }
         }
+        match self.ed.theme_request.take() {
+            Some(ThemeRequest::Named(name)) => self.theme_override = Some(name),
+            Some(ThemeRequest::Configured) => self.theme_override = None,
+            None => {}
+        }
         if let Some((cmd, args)) = self.ed.pending_command.take() {
             let outcome = self.keys.invoke(cmd, args);
             self.outcome(outcome, cx);
@@ -553,6 +580,7 @@ impl EmaxView {
         let empty = n == 0;
         let commands = matches!(p.kind, PickerKind::Commands { .. });
         let files = matches!(p.kind, PickerKind::Files { .. });
+        let themes = matches!(p.kind, PickerKind::Themes { .. });
         let footer_hint = if files {
             let typed = !p.filter().is_empty();
             let saving = p.saving();
@@ -568,11 +596,11 @@ impl EmaxView {
             items.push(("picker-quit", "cancel"));
             items.retain(|(_, l)| !l.is_empty());
             hints(&self.picker_keys, &items)
-        } else if commands {
+        } else if commands || themes {
             hints(
                 &self.picker_keys,
                 &[
-                    ("picker-accept", "run"),
+                    ("picker-accept", if themes { "load" } else { "run" }),
                     ("picker-next", "next"),
                     ("picker-previous", "prev"),
                     ("picker-quit", "cancel"),
@@ -646,6 +674,8 @@ impl EmaxView {
                             "Type to filter commands…"
                         } else if files {
                             "Type a path…"
+                        } else if themes {
+                            "Type to filter themes…"
                         } else {
                             "Type to filter buffers…"
                         }))
@@ -656,6 +686,7 @@ impl EmaxView {
                     match (commands, p.query.trim().is_empty()) {
                         _ if files && p.filter().is_empty() => "Empty or unreadable directory",
                         _ if files => "No matching file",
+                        _ if themes => "No matching theme",
                         (true, _) => "No matching command",
                         (false, true) => "No buffers",
                         (false, false) => "No matching buffer",
@@ -1113,7 +1144,7 @@ impl EmaxView {
             m.total,
             cx.processor(move |this: &mut EmaxView, range: Range<usize>, _w, _cx| {
                 let started = Instant::now();
-                let t = this.appearance.themes.get(this.dark);
+                let t = this.theme();
                 let Some(v) = this.ed.window_view(win) else { return Vec::new() };
                 let search = this.ed.swiper.as_ref().filter(|_| selected);
                 let selected_match = search.and_then(|s| s.selected_line());
@@ -1352,6 +1383,10 @@ impl Render for EmaxView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Spacing utilities are in rems: scale them with the font as well.
         window.set_rem_size(px(DESIGN_REM * self.ui_scale()));
+        // load-theme marks the theme on screen as current.
+        if self.ed.active_theme != self.active_theme().name {
+            self.ed.active_theme = self.active_theme().name.clone();
+        }
         let t0 = Instant::now();
         if let Some(start) = self.key_started.take() {
             self.last_latency_us = start.elapsed().as_micros();

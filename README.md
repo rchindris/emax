@@ -103,7 +103,8 @@ of these that is set:
 
 1. `$EMAX_CONFIG`
 2. `$XDG_CONFIG_HOME/emax/config.json`
-3. `~/.config/emax/config.json`
+3. on Windows, `%APPDATA%\emax\config.json`
+4. `~/.config/emax/config.json`
 
 The easiest way to change settings is the settings editor, `s-,` (Cmd-,), which
 works like VS Code's: search settings by name or description (`@modified` lists
@@ -133,9 +134,10 @@ same keys. Setting an entry to `null` removes a default binding:
 | `editor.tab_width` | Display width of a tab and the indent step (default 4) |
 | `font.family` | Font for buffer text (default `"monospace"`: Menlo on macOS, Consolas on Windows, DejaVu Sans Mono on Linux) |
 | `font.ui_family` | Font for the buffer picker and panel hints (default `"system-ui"`, the platform's UI font) |
-| `font.size` | Text size in pixels (default 14). The mode line, echo area, buffer picker and search panel scale with it |
+| `font.size` | Buffer text size in pixels (default 14). The mode line and echo area use it too |
+| `font.ui_size` | Size the buffer picker, `M-x`, the search panel and the tab bar are drawn at, in pixels. Their text, spacing and rows scale with it (default `null`: same as `font.size`) |
 | `font.line_height` | Line height as a multiple of the size (default 1.5) |
-| `theme` | The theme to use (default `"emax-dark"`), or `{ "light": …, "dark": … }` to follow the system appearance |
+| `theme` | The theme to use (default `"emax-dark"`), or `{ "light": …, "dark": … }` to follow the system appearance. `M-x load-theme` switches while running |
 | `themes` | Theme definitions; see [Themes](#themes) |
 | `keymaps.global` | Editing keys; multi-key sequences like `"C-x C-s"` work. Values are command names (`forward-char`, `swiper`, …) |
 | `keymaps.picker` | Keys while a picker is open; values are `picker-*` actions (`TAB` is `picker-complete`). Keys left unbound edit the query like the global ones (`C-a`, `C-d`, `M-f`, `C-y`…) |
@@ -256,6 +258,10 @@ uses `foreground`:
 ```json
 { "themes": { "emax-dark": { "syntax.keyword": "#ff79c6", "syntax.comment": "#6272a4" } } }
 ```
+`M-x load-theme` lists every theme, with each one shown live as you move
+through the list. `RET` keeps the theme until you quit (it then stays fixed, even
+when the system switches between light and dark), and `C-g` goes back to the one
+you had. The `configured` entry returns to the theme from your config.
 
 ## Project layout
 
@@ -282,7 +288,7 @@ src/
     files.rs         find-file's path picker (also dired's target prompts)
     settings.rs      the settings editor (s-,): setting schema, search, writes to the user file
     syntax.rs        tree-sitter parsing and highlighting; the list of languages
-    picker.rs        fuzzy "completing read" picker (buffer switching, M-x)
+    picker.rs        fuzzy "completing read" picker (buffer switching, M-x, load-theme)
     line_edit.rs     Emacs line editing in picker and settings text fields
     text.rs          pure motion primitives: words, sentences, paragraphs, sexps
     tests.rs         behavioural tests driven by real key sequences
