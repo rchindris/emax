@@ -883,6 +883,52 @@ fn random_bytes_flood_never_panics() {
     t.text();
 }
 
+// ------------------------------------------------------ real terminfo
+
+/// What `tput` prints for `args` with `TERM=xterm-256color` (what terminal
+/// buffers advertise), or `None` if tput isn't available.
+fn tput(args: &[&str]) -> Option<Vec<u8>> {
+    let out = std::process::Command::new("tput").args(args).env("TERM", "xterm-256color").output().ok()?;
+    out.status.success().then_some(out.stdout)
+}
+
+#[test]
+fn sequences_from_the_advertised_terminfo_work() {
+    let Some(clear) = tput(&["clear"]) else { return };
+    let seq = |args: &[&str]| tput(args).expect("tput capability");
+    let mut t = term(20, 5);
+    t.feed(b"junk\r\nmore junk");
+    t.feed(&clear);
+    assert_eq!(rows(&t), ["", "", "", "", ""]);
+    t.feed(&seq(&["cup", "2", "3"]));
+    assert_eq!(cursor(&t), (2, 3));
+    t.feed(&seq(&["setaf", "1"]));
+    t.feed(b"r");
+    t.feed(&seq(&["setab", "202"]));
+    t.feed(b"o");
+    t.feed(&seq(&["bold"]));
+    t.feed(b"b");
+    t.feed(&seq(&["sgr0"]));
+    t.feed(b"n");
+    assert_eq!(cell(&t, 2, 3).fg, P().ansi[1]);
+    assert_eq!(cell(&t, 2, 4).bg, P().indexed(202));
+    assert!(cell(&t, 2, 5).flags.bold);
+    assert_eq!(cell(&t, 2, 6).flags, CellFlags::default());
+    t.feed(&seq(&["smcup"]));
+    assert!(t.modes().alt_screen);
+    t.feed(&seq(&["rmcup"]));
+    assert!(!t.modes().alt_screen);
+    assert_eq!(rows(&t)[2], "   robn");
+    t.feed(&seq(&["smkx"]));
+    assert!(t.modes().app_cursor, "keypad transmit mode turns on application cursor keys");
+    t.feed(&seq(&["rmkx"]));
+    assert!(!t.modes().app_cursor);
+    t.feed(&seq(&["civis"]));
+    assert!(!snap(&t).cursor.visible);
+    t.feed(&seq(&["cnorm"]));
+    assert!(snap(&t).cursor.visible);
+}
+
 // -------------------------------------------------------------- draw runs
 
 #[test]
