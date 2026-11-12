@@ -210,9 +210,9 @@ it's keyed by buffer id); `Window.scroll_line` kept up to date; picker
 preview and swiper apply to the selected window; a tab bar when there is
 more than one tab; clicking a window selects it. For a terminal buffer,
 render `term_view::render_terminal` and call
-`ed.resize_terminal(buf, cols, rows)` with `term_view::grid_size` of the
-window (do this only for the selected window, or the first window showing
-that buffer if none is selected). Report `Layout::set_frame_size` each render.
+`ed.resize_terminal(buf, cols, rows)` with `term::grid_size` of the
+window, only from the window `Editor::terminal_owners` picks for it (the
+selected window if it shows the buffer, else the first one that does). Report `Layout::set_frame_size` each render.
 
 Tests: geometry (exact tiling, nested splits, ratios after delete/balance,
 rounding), every command (incl. error cases and prefix args), independent
@@ -297,7 +297,8 @@ impl Editor {
   `C-c C-j` term-copy-mode, `C-c C-k` term-char-mode, `C-c C-c`
   term-interrupt-subjob, `C-c C-d` term-send-eof, `C-c C-z`
   term-stop-subjob, `C-c C-\` term-quit-subjob, `C-c C-y`/`s-v` term-paste,
-  `S-<prior>`/`S-<next>` term-scroll-up/down. All other sequences that start
+  `S-<prior>`/`S-<next>` term-scroll-up/down, `C-TAB`/`C-S-TAB`
+  tab-next/tab-previous (so the global tab keys work from terminals). All other sequences that start
   with an escape key fall through to the global keymap (C-x b, M-x, ...).
 - Copy mode: put `term.text()` in the rope, point at the cursor's position,
   turn on `read-only-mode`, `mode = Copy`; char mode: empty the rope, turn
@@ -345,6 +346,7 @@ pub trait PtyBackend {
     fn write(&mut self, SessionId, &[u8]) -> io::Result<()>;
     fn resize(&mut self, SessionId, PtySize) -> io::Result<()>;
     fn kill(&mut self, SessionId) -> io::Result<()>;           // no events for it afterwards
+    fn pause_output(&mut self, SessionId, bool) -> io::Result<()> { Ok(()) } // hold back one session
     fn list(&mut self) -> io::Result<Vec<SessionInfo>>;
     fn try_recv(&mut self) -> Option<PtyEvent>;               // never blocks
     fn persistent(&self) -> bool { false }
@@ -362,7 +364,9 @@ tests that don't need real processes.
   read becomes one `Output` (never per byte); events go through a **bounded**
   channel (e.g. `sync_channel(256)`), so a stalled consumer blocks the reader,
   the kernel PTY buffer fills and the child blocks — memory stays bounded.
-  `notifier.notify()` after each send.
+  `notifier.notify()` after each send. `pause_output(id, true)` makes that
+  session's reader wait (other sessions keep flowing); a killed session is
+  never held.
 - On EOF/error the reader waits for the child and sends `Exited` — always
   after all of that session's `Output`.
 - `write` uses the master's writer (`write_all`); `resize` the master;
@@ -457,12 +461,13 @@ with a message if the session is gone; windows/tabs rebuilt through the pub
 current buffer and cursors set from the selected window). Terminal buffers
 are saved only when `pty.persistent()`.
 
-`main.rs`: `--pty-daemon`; on start, when `session_config.restore_session`
-and no files were given and a session file exists in
-`state_dir(session_config.state_dir)`, restore it (problems → message,
-start fresh); register a `KillEmacs` handler named `session-save` that writes
-`session_snapshot()` (removable by name, like any hook). Quitting never
-kills daemon sessions.
+`main.rs`: `--pty-daemon`; on start it calls
+`Editor::startup_session(file, files_named, config_warnings)` (tested in
+`session/mod.rs`): when `session_config.restore_session` and no files were
+given and a session file exists in `state_dir(session_config.state_dir)`,
+restore it (problems → message, start fresh); then register a `KillEmacs`
+handler named `session-save` that writes `session_snapshot()` (removable by
+name, like any hook). Quitting never kills daemon sessions.
 
 Tests: snapshot/restore round trips (files, text buffers, splits, tabs,
 points, terminal buffers via `MockBackend` + `add_detached`), missing file,
@@ -487,13 +492,17 @@ drop the client, reconnect and see the earlier output replayed.
 Parsed into `Config.terminal: TerminalConfig` (with `keymap`) and
 `Config.session: SessionConfig`, installed with
 `Editor::set_terminal_config(Arc<..>)` / `Editor.session_config` in
-`main.rs`. Environment overrides: `EMAX_PTYD_SOCKET` (daemon socket),
-`EMAX_STATE_DIR` (state dir).
+`main.rs`. Environment overrides (they win over the configuration):
+`EMAX_PTYD_SOCKET` (daemon socket, else `terminal.socket`, else
+`$TMPDIR/emax-$UID/ptyd.sock`: `session::socket_path`) and `EMAX_STATE_DIR`
+(state dir, else `session.state_dir`, else `$XDG_STATE_HOME/emax`, else
+`~/.local/state/emax`: `session::state_dir`).
 
 ## 9. Key bindings (in place, `keymaps.global`)
 
 C-x 2/3/0/1/o/+/^/}/{ (windows), C-x w <arrows> (windmove), C-x t 2/0/o/S-o/r
-and C-TAB / C-S-TAB (tabs). Terminal keys: §5.
+and C-TAB / C-S-TAB (tabs; also bound in `keymaps.terminal`, so they work
+in char-mode terminals). Terminal keys: §5.
 
 ## 10. Final API: changes and additions after integration
 
@@ -516,10 +525,14 @@ and C-TAB / C-S-TAB (tabs). Terminal keys: §5.
   `resize_window`, `windmove`, `window_view`, `window_point`,
   `set_window_scroll`, `buffer_name(id) -> Option<&str>`, and tab helpers
   `select_tab`, `new_tab`, `close_tab`, `next_tab`, `rename_tab`, `tab_name`,
-  `tab_names`. Exactly one `WindowConfigurationChanged` per change.
+  `tab_names`, `terminal_owners(&[WindowId])` (which window sizes each
+  shared terminal). Exactly one `WindowConfigurationChanged` per change
+  (`kill_buffer` too, however many windows it touches).
 - Undo/redo keep other windows' points in place: `Buffer::undo/redo` return
   `(cursors, Vec<buffer::Change>)` and the commands pass each change to
-  `Layout::adjust_for_edit`.
+  `Layout::adjust_for_edit`. An edit refused in `read-only-mode` (the
+  command runs, then its group is aborted) puts other windows' cursors back
+  exactly (`Layout::other_windows_cursors` / `restore_cursors`).
 - `C-x t r` without `Args.text` clears the explicit tab name.
 - UI: scroll handles keyed by `(WindowId, BufferId)`; the search panel is
   docked inside the selected window.
@@ -530,10 +543,15 @@ and C-TAB / C-S-TAB (tabs). Terminal keys: §5.
   `term::buffer::{POLL_BUDGET_BYTES (4 MiB), TERM_BUFFER_NAME}`.
 - Synchronized updates (mode 2026) are disabled in the parser: a headless
   terminal has nothing to redraw it when vte's timeout passes.
-- `encode_paste` turns line breaks into `\r` and strips an embedded
-  `ESC[201~` in bracketed mode. `term-scroll-up/down` scroll a page, or N
+- `encode_paste` turns line breaks into `\r`; in bracketed mode it drops
+  every control character except tab and line breaks (ESC included), so no
+  nesting can rebuild the `ESC[201~` end marker. `term-scroll-up/down` scroll a page, or N
   lines with a prefix argument.
 - `TermState.spec.size` follows resizes (saved in the session file).
+- `Terminal` re-clamps the display offset to the history after each feed
+  and resize (alacritty can grow it past the history on region scrolls in
+  a scrolled-back view); `snapshot` clamps too. `term::grid_size(width,
+  height, cell_w, line_h)` lives in the engine.
 - Exit message: `Process <name> exited`, `... exited with code N` or
   `... exited (killed by signal S)`.
 - Copy-mode entry/exit puts other windows showing that terminal buffer at
@@ -542,7 +560,7 @@ and C-TAB / C-S-TAB (tabs). Terminal keys: §5.
   (cell width is now explicit), `measure_cell_width(window, family, size)`
   (the real advance; measured every render and also used for
   `Layout::set_frame_size`), `cell_width(size)` (estimate before the first
-  render), `grid_size`.
+  render).
 
 ### PTY (`src/engine/pty/local.rs`, `sys.rs`)
 - `LocalBackend::{new, with_kill_grace}`, inspection helpers `pid`, `queued`,
@@ -553,6 +571,10 @@ and C-TAB / C-S-TAB (tabs). Terminal keys: §5.
   group, SIGKILL after the grace period.
 - Output queued before `detach` is still delivered; output read while
   detached is dropped; an exit while detached is reported on `attach`.
+- An exited session's writer thread ends with the process (the waiter tells
+  it), and once all output is read the PTY is closed and the finished
+  threads joined; the session stays listed (with its exit) until `kill`.
+- `pause_output` (see §6).
 
 ### Session (`src/engine/session/`)
 - `DaemonBackend::connect_or_start(socket, replay_bytes, idle_exit, waker)`
@@ -568,20 +590,30 @@ and C-TAB / C-S-TAB (tabs). Terminal keys: §5.
 - Version mismatch: the daemon sends its own `Hello`, then closes.
 - Several clients on one session get broadcast output; the last resize
   wins; killing a session sends `Exited { signal: "Killed" }` to the others.
-  Flow control: a client with more than `HIGH_WATER` (8 MiB) queued pauses
-  reading from the backend.
+  Flow control is per session: a client with more than `HIGH_WATER` (8 MiB)
+  queued holds back the output of the sessions it is attached to
+  (`PtyBackend::pause_output`); other sessions keep flowing.
+- Both ends check the peer's uid (`daemon::check_peer`, `getpeereid` /
+  `SO_PEERCRED`): a socket in a shared directory bound by another user is
+  refused. The acceptor backs off on `accept` errors such as `EMFILE`.
+- The client's socket has a write timeout (the reply timeout): a daemon that
+  stopped reading drops the connection instead of freezing the editor.
 - `session::validate`, `Editor::restore_session_file(path) -> io::Result<bool>`
   (a bad file is renamed to `*.json.corrupt`), `Editor::save_session_on_quit`
   (hook `SAVE_HOOK = "session-save"`).
 - `Editor.waker` forwards to whatever `set_waker` installed last, so a
   backend created during restore (before the view exists) still wakes it.
+  `set_waker` calls the new waker once: a replay that arrived before it was
+  installed woke the old one, and the backend wakes only once per batch.
 - Restore and save happen only when emax starts with no files, so
-  `emax file` neither restores nor overwrites the saved workspace.
+  `emax file` neither restores nor overwrites the saved workspace
+  (`Editor::startup_session`).
 
 ### Tests across subsystems
 `src/engine/e2e_tests.rs`: `/bin/sh` in a terminal buffer through
 `LocalBackend`, driven key by key; paste and interrupt; two terminals in
 split windows sized by their windows (`stty size`); a session saved, then
 restored into a new editor that reattaches through an in-process daemon
-running real processes (replay, then live); hook event order.
+running real processes (replay, then live); the same restored before the
+view's waker exists, ticking only when woken; hook event order.
 `tests/daemon.rs` runs the real binary.

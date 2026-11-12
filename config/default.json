@@ -440,7 +440,9 @@
       "C-c C-y": "term-paste",
       "s-v": "term-paste",
       "S-<prior>": "term-scroll-up",
-      "S-<next>": "term-scroll-down"
+      "S-<next>": "term-scroll-down",
+      "C-TAB": "tab-next",
+      "C-S-TAB": "tab-previous"
     },
 
     "search": {

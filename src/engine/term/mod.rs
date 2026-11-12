@@ -314,6 +314,17 @@ impl Dimensions for Size {
     }
 }
 
+/// How many (cols, rows) cells of `cell_w`×`line_h` pixels fit in
+/// `width`×`height` pixels: whole cells, at least one each way (the view
+/// sizes a terminal to its window with this).
+pub fn grid_size(width: f32, height: f32, cell_w: f32, line_h: f32) -> (u16, u16) {
+    let fit = |len: f32, cell: f32| {
+        let n = (len / cell.max(1.0)).floor();
+        if n.is_finite() { n.clamp(1.0, u16::MAX as f32) as u16 } else { 1 }
+    };
+    (fit(width, cell_w), fit(height, line_h))
+}
+
 fn clamp_size(cols: u16, rows: u16) -> Size {
     Size { cols: cols.clamp(MIN_COLS, MAX_COLS) as usize, rows: rows.clamp(MIN_ROWS, MAX_ROWS) as usize }
 }
@@ -373,7 +384,18 @@ impl Terminal {
         if let Some(t) = &feed.title {
             self.title = t.clone();
         }
+        self.clamp_display_offset();
         feed
+    }
+
+    /// alacritty grows the display offset on some region scrolls in a
+    /// scrolled-back view without capping it at the history; reading rows
+    /// above the history panics (debug) or shows the wrong ones (release).
+    fn clamp_display_offset(&mut self) {
+        let g = self.term.grid();
+        if g.display_offset() > g.history_size() {
+            self.term.scroll_display(Scroll::Delta(0));
+        }
     }
 
     /// The color a program asking for color `index` (OSC 4/10/11/12) gets.
@@ -388,6 +410,7 @@ impl Terminal {
     /// screen reflows wrapped lines; the alternate screen is cut or padded.
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.term.resize(clamp_size(cols, rows));
+        self.clamp_display_offset();
     }
 
     /// (cols, rows).
@@ -444,7 +467,7 @@ impl Terminal {
         }
         let grid = self.term.grid();
         let (cols, rows) = (grid.columns(), grid.screen_lines());
-        let offset = grid.display_offset();
+        let offset = grid.display_offset().min(grid.history_size());
         let lines = (0..rows)
             .map(|r| {
                 let row = &grid[Line(r as i32 - offset as i32)];
@@ -539,7 +562,7 @@ impl Terminal {
         if col > 0 && grid[point.line][Column(col)].flags.contains(Flags::WIDE_CHAR_SPACER) {
             col -= 1;
         }
-        let row = point.line.0 + grid.display_offset() as i32;
+        let row = point.line.0 + grid.display_offset().min(grid.history_size()) as i32;
         let in_view = (0..grid.screen_lines() as i32).contains(&row);
         let shape = match self.term.cursor_style().shape {
             VteCursorShape::Block => CursorShape::Block,
@@ -549,7 +572,9 @@ impl Terminal {
             VteCursorShape::Hidden => CursorShape::Block,
         };
         let shown = self.term.mode().contains(TermMode::SHOW_CURSOR) && self.term.cursor_style().shape != VteCursorShape::Hidden;
-        CursorState { row: row.max(0) as usize, col, shape, visible: shown && in_view }
+        // A cursor out of view (below a scrolled-back view) still names a row on screen.
+        let row = row.clamp(0, grid.screen_lines() as i32 - 1) as usize;
+        CursorState { row, col, shape, visible: shown && in_view }
     }
 
     /// Scrollback and screen as text (trailing blanks trimmed, wrapped lines

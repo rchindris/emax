@@ -185,6 +185,23 @@ impl Layout {
         }
     }
 
+    /// The cursors of the unselected windows showing `buf` (to put back
+    /// with [`restore_cursors`](Self::restore_cursors)).
+    pub fn other_windows_cursors(&self, buf: BufferId) -> Vec<(WindowId, Vec<Cursor>)> {
+        let selected = self.selected();
+        self.windows.values().filter(|w| w.buffer == buf && w.id != selected).map(|w| (w.id, w.cursors.clone())).collect()
+    }
+
+    /// Put back cursors saved by [`other_windows_cursors`](Self::other_windows_cursors)
+    /// in the windows that still show `buf`.
+    pub fn restore_cursors(&mut self, buf: BufferId, saved: Vec<(WindowId, Vec<Cursor>)>) {
+        for (id, cursors) in saved {
+            if let Some(w) = self.windows.get_mut(&id).filter(|w| w.buffer == buf) {
+                w.cursors = cursors;
+            }
+        }
+    }
+
     /// Unselected windows showing the killed buffer `buf` show `replacement`
     /// instead (with point at its start). Returns whether any window changed.
     pub fn replace_buffer(&mut self, buf: BufferId, replacement: BufferId) -> bool {

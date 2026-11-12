@@ -579,8 +579,8 @@ fn an_idle_daemon_exits_but_not_while_in_use() {
 
 // -------------------------------------------------------------- flow
 
-/// A client that stops reading makes the daemon stop reading program
-/// output (so programs block, instead of the daemon buffering without
+/// A client that stops reading makes the daemon hold back the output of
+/// its sessions (so programs block, instead of the daemon buffering without
 /// bound); nothing is lost, and everything flows again once it goes away.
 #[test]
 fn a_stalled_client_holds_output_back_without_losing_any() {
@@ -596,30 +596,25 @@ fn a_stalled_client_holds_output_back_without_losing_any() {
     let chunk: Vec<u8> = (0..64 << 10).map(|i| (i % 256) as u8).collect();
     let n = 3 * HIGH_WATER / chunk.len();
     let total = n * chunk.len();
-    let producer = {
-        let mock = d.mock.clone();
-        let chunk = chunk.clone();
-        thread::spawn(move || {
-            for _ in 0..n {
-                mock.output(id, &chunk);
-            }
-        })
-    };
-    // `a` gets output only until the stalled client is HIGH_WATER behind
-    // (plus what the socket buffers hold). That output stops can only be
-    // seen over time: give it a second to (wrongly) deliver everything.
+    for _ in 0..n {
+        d.mock.output(id, &chunk);
+    }
+    // The stalled client falls HIGH_WATER behind: the session is held back
+    // for good. (`a` lagging can hold it back for a moment too; then a
+    // round trip brings more output.) Everything the daemon sent `a` is in
+    // once a request round-trips: its reply is queued behind the output.
     let mut ev = Vec::new();
-    recv_until(&mut a, &mut ev, "output up to the high-water mark", |ev| output(ev, id).len() >= HIGH_WATER / 2);
-    producer.join().unwrap();
-    let until = Instant::now() + Duration::from_secs(1);
-    while Instant::now() < until && output(&ev, id).len() < total {
+    wait_until("the session to be held back with `a` caught up", TIMEOUT, || {
+        let before = output(&ev, id).len();
+        sync(&mut a);
         while let Some(e) = a.try_recv() {
             ev.push(e);
         }
-        thread::sleep(Duration::from_millis(10));
-    }
+        d.mock.session(id).unwrap().paused && output(&ev, id).len() == before
+    });
     let held = output(&ev, id).len();
-    assert!(held <= HIGH_WATER + (4 << 20), "the stalled client should hold output back; {held} of {total} bytes flowed");
+    assert!(held >= HIGH_WATER && held < total, "{held} of {total} bytes flowed");
+    assert!(d.mock.session(id).unwrap().paused, "held back while the client stalls");
 
     // It goes away: everything arrives, in order.
     drop(stalled);
@@ -627,6 +622,33 @@ fn a_stalled_client_holds_output_back_without_losing_any() {
     let all = output(&ev, id);
     assert_eq!(all.len(), total);
     assert!(all.chunks(chunk.len()).all(|c| c == chunk.as_slice()));
+    assert!(!d.mock.session(id).unwrap().paused);
+}
+
+/// One stalled client holds back only the sessions it is attached to:
+/// another client's sessions keep flowing (no head-of-line blocking).
+#[test]
+fn a_stalled_client_does_not_hold_back_other_sessions() {
+    let d = TestDaemon::start(1 << 10);
+    let mut stalled = d.raw();
+    write_frame(&mut stalled, &ClientMsg::Request { req: 1, op: Op::Spawn(spec("x")) }).unwrap();
+    let x = match read_frame::<DaemonMsg>(&mut stalled).unwrap() {
+        Some(DaemonMsg::Reply { req: 1, result: Ok(Reply::Spawned(id)) }) => id,
+        other => panic!("expected a spawn reply, got {other:?}"),
+    };
+    let mut b = d.client();
+    let y = b.spawn(spec("y")).unwrap();
+    let chunk = vec![b'x'; 64 << 10];
+    for _ in 0..3 * HIGH_WATER / chunk.len() {
+        d.mock.output(x, &chunk);
+    }
+    wait_until("the stalled session to be held back", TIMEOUT, || d.mock.session(x).unwrap().paused);
+    d.mock.output(y, b"hello-from-y");
+    let mut ev = Vec::new();
+    expect_output(&mut b, &mut ev, y, b"hello-from-y");
+    assert!(!d.mock.session(y).unwrap().paused);
+    drop(stalled);
+    wait_until("the session to flow again", TIMEOUT, || !d.mock.session(x).unwrap().paused);
 }
 
 // ---------------------------------------------------------- binding

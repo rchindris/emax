@@ -121,6 +121,16 @@ pub trait PtyBackend {
     /// Stop reporting a session's output (output meanwhile is dropped, except
     /// what a replay buffer keeps); the process keeps running.
     fn detach(&mut self, id: SessionId) -> io::Result<()>;
+    /// Hold back a session's output (`paused`), or let it flow again. While
+    /// held, the backend stops reading it: the program blocks once the PTY
+    /// buffer is full, and nothing is lost. Other sessions keep flowing (the
+    /// daemon holds back only the sessions a lagging client is attached to).
+    /// A killed session is never held. Backends that can't hold output back
+    /// ignore this.
+    fn pause_output(&mut self, id: SessionId, paused: bool) -> io::Result<()> {
+        let _ = (id, paused);
+        Ok(())
+    }
     /// Send input to the process.
     fn write(&mut self, id: SessionId, bytes: &[u8]) -> io::Result<()>;
     fn resize(&mut self, id: SessionId, size: PtySize) -> io::Result<()>;

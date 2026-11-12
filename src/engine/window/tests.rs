@@ -652,6 +652,26 @@ fn undo_and_redo_move_the_other_windows_point_too() {
 }
 
 #[test]
+fn refused_edits_in_a_read_only_buffer_leave_other_windows_points_alone() {
+    let mut e = editor("abcdef\nghij");
+    e.goto(11); // the end
+    e.keys("C-x 2");
+    let other = e.ed.layout.window_order()[1];
+    assert_eq!(e.ed.window_point(other), Some(11));
+    e.keys("M-<");
+    e.run("read-only-mode");
+    e.ed.execute("self-insert-command", Args { text: Some("X".into()), ..Default::default() });
+    assert!(e.msg().contains("read-only"), "{}", e.msg());
+    e.keys("C-k");
+    e.run_n("delete-char", 3);
+    assert_eq!(e.ed.rope().to_string(), "abcdef\nghij");
+    assert_eq!(e.ed.window_point(other), Some(11), "the refused deletions must not pull it back");
+    assert_eq!(e.point(), 0);
+    e.keys("C-x o");
+    assert_eq!(e.point(), 11);
+}
+
+#[test]
 fn windows_on_different_buffers_switch_the_current_buffer() {
     let mut e = editor("first");
     let b = e.ed.add_buffer(Buffer::from_str("b", "second buffer"));
@@ -915,21 +935,25 @@ fn killing_a_buffer_shown_in_several_windows_and_tabs() {
     e.ed.switch_to_buffer(b);
     e.check();
     assert_eq!(e.ed.layout.windows_showing(b).len(), 2);
+    e.ed.run_hooks();
     e.changes();
     e.ed.kill_buffer(b);
     e.ed.run_hooks();
     e.check();
     assert!(e.ed.layout.windows_showing(b).is_empty());
     assert_eq!(e.ed.buf.name, "a");
-    assert!(e.changes() >= 1);
+    assert_eq!(e.changes(), 1, "exactly one WindowConfigurationChanged per change");
     // Back in tab 1, the lower window shows the replacement.
     e.keys("C-x t o");
     for id in e.ed.layout.window_order() {
         assert_eq!(e.ed.layout.window(id).unwrap().buffer, 1);
     }
     // Killing the last buffer leaves *scratch* everywhere.
+    e.changes();
     e.ed.kill_buffer(1);
+    e.ed.run_hooks();
     e.check();
+    assert_eq!(e.changes(), 1);
     assert_eq!(e.ed.buf.name, "*scratch*");
     assert_eq!(e.ed.layout.windows_showing(e.ed.buf_id).len(), e.ed.layout.windows.len());
 }

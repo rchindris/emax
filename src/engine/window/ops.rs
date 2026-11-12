@@ -17,18 +17,24 @@ impl Editor {
     /// whenever the current buffer changes). A window that changes buffer
     /// starts at the top of the new one.
     pub(crate) fn sync_selected_window(&mut self) {
+        if self.sync_selected_window_quietly() {
+            self.window_changed();
+        }
+    }
+
+    /// [`sync_selected_window`](Self::sync_selected_window) without the
+    /// event, for callers that make several changes and report them once.
+    /// Returns whether the window changed.
+    pub(crate) fn sync_selected_window_quietly(&mut self) -> bool {
         let sel = self.layout.selected();
         let buf = self.buf_id;
-        let changed = match self.layout.windows.get_mut(&sel) {
+        match self.layout.windows.get_mut(&sel) {
             Some(w) if w.buffer != buf => {
                 w.buffer = buf;
                 w.scroll_line = 0;
                 true
             }
             _ => false,
-        };
-        if changed {
-            self.window_changed();
         }
     }
 

@@ -132,12 +132,14 @@ fn special_key(key: &Key, modes: Modes) -> Option<Vec<u8>> {
 }
 
 /// The bytes pasting `text` sends (bracketed when the program asked for it).
-/// Line breaks become `\r` (what Enter sends); inside brackets, the end
-/// marker is removed from the text so a paste can't end the bracket early.
+/// Line breaks become `\r` (what Enter sends). Inside brackets, control
+/// characters other than tab and line breaks are dropped (ESC among them),
+/// so pasted text can't end the bracket early, however it nests the end
+/// marker, and then run the rest as typed input.
 pub fn encode_paste(text: &str, modes: Modes) -> Vec<u8> {
     let text = text.replace("\r\n", "\r").replace('\n', "\r");
     if modes.bracketed_paste {
-        let text = text.replace("\x1b[201~", "");
+        let text: String = text.chars().filter(|&c| matches!(c, '\t' | '\r') || !c.is_control()).collect();
         let mut v = b"\x1b[200~".to_vec();
         v.extend_from_slice(text.as_bytes());
         v.extend_from_slice(b"\x1b[201~");
@@ -307,7 +309,14 @@ mod tests {
         assert_eq!(encode_paste("a\nb\r\nc", plain), b"a\rb\rc");
         assert_eq!(encode_paste("ls", bracketed), b"\x1b[200~ls\x1b[201~");
         assert_eq!(encode_paste("", bracketed), b"\x1b[200~\x1b[201~");
-        assert_eq!(encode_paste("x\x1b[201~rm -rf\n", bracketed), b"\x1b[200~xrm -rf\r\x1b[201~");
+        assert_eq!(encode_paste("x\x1b[201~rm -rf\n", bracketed), b"\x1b[200~x[201~rm -rf\r\x1b[201~");
+        // A nested end marker can't be rebuilt by removing an inner one.
+        let nested = encode_paste("a\x1b[20\x1b[201~1~rm -rf ~\n", bracketed);
+        assert_eq!(nested, b"\x1b[200~a[20[201~1~rm -rf ~\r\x1b[201~");
+        let inner = &nested[6..nested.len() - 6];
+        assert!(!inner.contains(&0x1b), "no ESC inside the brackets");
+        // Other controls go too (C1 included); tabs and line breaks stay.
+        assert_eq!(encode_paste("a\tb\x03\x7f\u{9b}201~c\r\n", bracketed), b"\x1b[200~a\tb201~c\r\x1b[201~");
         assert_eq!(encode_paste("日本\n", plain), "日本\r".as_bytes());
     }
 }

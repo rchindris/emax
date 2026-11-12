@@ -72,6 +72,7 @@ impl DaemonBackend {
     /// Connect to a running daemon at `socket`.
     pub fn connect(socket: &Path, waker: Waker) -> io::Result<Self> {
         let stream = UnixStream::connect(socket)?;
+        super::daemon::check_peer(&stream)?;
         Self::handshake(stream, waker)
     }
 
@@ -92,6 +93,9 @@ impl DaemonBackend {
         // macOS refuses socket options once the peer has hung up; the reader
         // then finds the end of the stream, so that is not an error here.
         let _ = stream.set_read_timeout(None);
+        // A daemon that stopped reading (hung, SIGSTOPped) must not freeze
+        // the editor: a write that can't finish in time loses the connection.
+        let _ = stream.set_write_timeout(Some(REPLY_TIMEOUT));
         let notifier = Notifier::new(waker);
         let connected = Arc::new(AtomicBool::new(true));
         let (tx, incoming) = mpsc::sync_channel(CHANNEL_DEPTH);
@@ -164,9 +168,11 @@ impl DaemonBackend {
         self.request(Op::Shutdown).map(|_| ())
     }
 
-    /// How long requests wait for a reply (tests shorten it).
+    /// How long requests wait for a reply, and writes for the daemon to
+    /// take them (tests shorten it).
     pub fn set_reply_timeout(&mut self, t: Duration) {
         self.reply_timeout = t;
+        let _ = self.stream.set_write_timeout(Some(t));
     }
 
     fn send(&mut self, msg: &ClientMsg) -> io::Result<()> {
@@ -174,7 +180,9 @@ impl DaemonBackend {
             return Err(not_connected());
         }
         write_frame(&mut self.stream, msg).map_err(|e| {
+            // A frame may be half written: hang up rather than go on.
             self.connected.store(false, Ordering::Release);
+            let _ = self.stream.shutdown(std::net::Shutdown::Both);
             io::Error::new(io::ErrorKind::NotConnected, e)
         })
     }
@@ -456,6 +464,33 @@ mod tests {
         // A reply of the wrong shape.
         assert_eq!(c.spawn(SpawnSpec::default()).unwrap_err().kind(), io::ErrorKind::InvalidData);
         drop(c);
+        t.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A daemon that stops reading (hung, stopped) can't freeze the editor:
+    /// writes give up and the connection is dropped.
+    #[test]
+    fn writes_to_a_daemon_that_stopped_reading_time_out() {
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let (dir, socket, t) = fake(move |mut s| {
+            greet(&mut s);
+            let _ = done_rx.recv_timeout(TIMEOUT); // reads nothing more
+        });
+        let mut c = DaemonBackend::connect(&socket, noop_waker()).unwrap();
+        c.set_reply_timeout(Duration::from_millis(100));
+        let chunk = vec![b'x'; MAX_WRITE_CHUNK];
+        let start = Instant::now();
+        let e = loop {
+            match c.write(SessionId(1), &chunk) {
+                Ok(()) => assert!(start.elapsed() < TIMEOUT, "writes never gave up"),
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(e.kind(), io::ErrorKind::NotConnected);
+        assert!(!c.is_connected());
+        assert_eq!(c.write(SessionId(1), b"x").unwrap_err().kind(), io::ErrorKind::NotConnected);
+        done_tx.send(()).unwrap();
         t.join().unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }

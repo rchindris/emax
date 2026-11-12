@@ -943,21 +943,6 @@ impl EmaxView {
         })
     }
 
-    /// For each terminal buffer on screen, the window whose size it takes:
-    /// the selected window if it shows it, else the first one that does.
-    fn terminal_owners(&self, rects: &[(WindowId, Rect)]) -> HashMap<u64, WindowId> {
-        let mut owners = HashMap::new();
-        let sel = self.ed.layout.selected();
-        for win in std::iter::once(sel).chain(rects.iter().map(|r| r.0)) {
-            if let Some(b) = self.ed.layout.window(win).map(|w| w.buffer) {
-                if self.ed.is_terminal(b) {
-                    owners.entry(b).or_insert(win);
-                }
-            }
-        }
-        owners
-    }
-
     /// The text list of window `win` showing buffer `buf`.
     fn render_text(&mut self, win: WindowId, m: &ModeLine, gutter_w: Pixels, cx: &mut Context<Self>) -> AnyElement {
         let selected = win == self.ed.layout.selected();
@@ -1082,7 +1067,7 @@ impl EmaxView {
                 let snap = if owns_terminal {
                     let panel = if selected && self.ed.swiper.is_some() { self.swiper_panel_height() } else { 0.0 };
                     let border = if right_edge { 1.0 } else { 0.0 };
-                    let (cols, rows) = term_view::grid_size(
+                    let (cols, rows) = emax::engine::term::grid_size(
                         r.w - border,
                         r.h - self.modeline_height() - panel,
                         self.cell_w,
@@ -1194,7 +1179,8 @@ impl Render for EmaxView {
         let rects = compute_rects(&self.ed.layout.tab().root, Rect { x: 0.0, y: 0.0, w: area_w, h: area_h });
 
         self.prune_scrolls();
-        let owners = self.terminal_owners(&rects);
+        let order: Vec<WindowId> = rects.iter().map(|r| r.0).collect();
+        let owners = self.ed.terminal_owners(&order);
         let windows: Vec<AnyElement> = rects
             .iter()
             .map(|&(win, r)| {

@@ -194,9 +194,14 @@ impl Editor {
     // ------------------------------------------------------- integration
 
     /// The UI's wake-up function: backends call it when terminal output
-    /// arrives (including backends created before it was set).
+    /// arrives (including backends created before it was set). It is called
+    /// once right away: output may already be waiting (e.g. the replay of a
+    /// session restored before the UI existed), and a backend wakes only
+    /// once per batch until it is drained, so that wake-up went to the old
+    /// waker and the new one would otherwise never hear from it again.
     pub fn set_waker(&mut self, waker: Waker) {
-        *self.waker_target.write().unwrap_or_else(|e| e.into_inner()) = waker;
+        *self.waker_target.write().unwrap_or_else(|e| e.into_inner()) = waker.clone();
+        waker();
     }
 
     /// Use `backend` for terminal processes (tests use `pty::mock`).
@@ -214,7 +219,7 @@ impl Editor {
             let backend: Box<dyn PtyBackend> = match cfg.backend {
                 PtyBackendKind::Local => Box::new(LocalBackend::new(waker)),
                 PtyBackendKind::Daemon => {
-                    let socket = cfg.socket.clone().unwrap_or_else(super::session::default_socket_path);
+                    let socket = super::session::socket_path(cfg.socket.as_deref());
                     match DaemonBackend::connect_or_start(&socket, cfg.replay_bytes, cfg.daemon_idle_exit, waker.clone()) {
                         Ok(b) => Box::new(b),
                         Err(e) => {
@@ -470,6 +475,9 @@ impl Editor {
         if undoable {
             self.buf.begin_group(&self.cursors, self_insert);
         }
+        // A refused edit is taken back below; the text comes back exactly,
+        // but points it moved (deletions collapse them) can't be recomputed.
+        let other_points = (undoable && read_only).then(|| (self.buf_id, self.layout.other_windows_cursors(self.buf_id)));
 
         // Shift-selection (Emacs' shift-select-mode).
         if cmd.flags & flags::MOTION != 0 {
@@ -495,6 +503,9 @@ impl Editor {
         let refused = if undoable && read_only { self.buf.abort_group() } else { None };
         if let Some(before) = refused {
             self.cursors = before;
+            if let Some((buf, saved)) = other_points {
+                self.layout.restore_cursors(buf, saved);
+            }
             self.message = Some(self.read_only_message());
         }
         let edited = undoable && !read_only && self.buf.end_group(&self.cursors);

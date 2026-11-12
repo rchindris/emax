@@ -82,31 +82,60 @@ pub struct SavedWindow {
     pub scroll_line: usize,
 }
 
-/// Where the daemon listens: `$EMAX_PTYD_SOCKET`, else
-/// `$TMPDIR/emax-$UID/ptyd.sock` (the configuration can override it too:
-/// `terminal.socket`).
+/// Looks up an environment variable (tests pass their own environment).
+type Env<'a> = &'a dyn Fn(&str) -> Option<std::ffi::OsString>;
+
+fn process_env(name: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(name)
+}
+
+/// A non-empty environment variable as a path.
+fn env_path(env: Env, name: &str) -> Option<PathBuf> {
+    env(name).filter(|p| !p.is_empty()).map(PathBuf::from)
+}
+
+/// Where the daemon listens when nothing is configured:
+/// `$EMAX_PTYD_SOCKET`, else `$TMPDIR/emax-$UID/ptyd.sock`.
 pub fn default_socket_path() -> PathBuf {
-    if let Some(p) = std::env::var_os("EMAX_PTYD_SOCKET").filter(|p| !p.is_empty()) {
-        return PathBuf::from(p);
+    socket_path(None)
+}
+
+/// Where the daemon listens: `$EMAX_PTYD_SOCKET`, else `configured`
+/// (`terminal.socket`), else `$TMPDIR/emax-$UID/ptyd.sock` (a directory
+/// private to this user). The environment wins, as for [`state_dir`].
+pub fn socket_path(configured: Option<&Path>) -> PathBuf {
+    socket_path_in(&process_env, configured, &std::env::temp_dir())
+}
+
+fn socket_path_in(env: Env, configured: Option<&Path>, tmp: &Path) -> PathBuf {
+    if let Some(p) = env_path(env, "EMAX_PTYD_SOCKET") {
+        return p;
+    }
+    if let Some(p) = configured {
+        return p.to_path_buf();
     }
     // SAFETY: getuid has no preconditions and cannot fail.
     let uid = unsafe { libc::getuid() };
-    std::env::temp_dir().join(format!("emax-{uid}")).join("ptyd.sock")
+    tmp.join(format!("emax-{uid}")).join("ptyd.sock")
 }
 
-/// Where session state is kept: `$EMAX_STATE_DIR`, else `configured`, else
-/// `$XDG_STATE_HOME/emax`, else `~/.local/state/emax`.
+/// Where session state is kept: `$EMAX_STATE_DIR`, else `configured`
+/// (`session.state_dir`), else `$XDG_STATE_HOME/emax`, else
+/// `~/.local/state/emax`.
 pub fn state_dir(configured: Option<&Path>) -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("EMAX_STATE_DIR").filter(|p| !p.is_empty()) {
-        return Some(PathBuf::from(p));
+    state_dir_in(&process_env, configured)
+}
+
+fn state_dir_in(env: Env, configured: Option<&Path>) -> Option<PathBuf> {
+    if let Some(p) = env_path(env, "EMAX_STATE_DIR") {
+        return Some(p);
     }
     if let Some(p) = configured {
         return Some(p.to_path_buf());
     }
-    std::env::var_os("XDG_STATE_HOME")
-        .filter(|p| !p.is_empty())
-        .map(|p| PathBuf::from(p).join("emax"))
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("state").join("emax")))
+    env_path(env, "XDG_STATE_HOME")
+        .map(|p| p.join("emax"))
+        .or_else(|| env_path(env, "HOME").map(|h| h.join(".local").join("state").join("emax")))
 }
 
 /// The session file in `dir`.
@@ -396,6 +425,33 @@ impl Editor {
         }
     }
 
+    /// The startup policy for the saved session: restore it from `file` when
+    /// `session.restore_session` is on and no files were named on the
+    /// command line, and then save it there on quit. A quick `emax file`
+    /// neither restores nor overwrites the saved workspace (its terminal
+    /// processes live on in the daemon either way). The echo area keeps the
+    /// startup message when there is nothing to restore, and always when
+    /// the configuration had problems (they matter more than the restore
+    /// summary). Returns the restore error, if any, for the caller to log.
+    pub fn startup_session(&mut self, file: Option<PathBuf>, files_named: bool, config_warnings: bool) -> Option<io::Error> {
+        let file = file.filter(|_| self.session_config.restore_session && !files_named)?;
+        let startup = self.message.take();
+        let mut error = None;
+        match self.restore_session_file(&file) {
+            Ok(true) => {}
+            Ok(false) => self.message = startup.clone(),
+            Err(e) => {
+                self.message = Some(format!("Session not restored: {e}"));
+                error = Some(e);
+            }
+        }
+        if config_warnings {
+            self.message = startup;
+        }
+        self.save_session_on_quit(file);
+        error
+    }
+
     /// Save the session to `path` when the editor quits: a `kill-emacs`
     /// handler named [`SAVE_HOOK`] (remove it by that name to stop saving).
     pub fn save_session_on_quit(&mut self, path: PathBuf) {
@@ -461,11 +517,37 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// An environment with just `vars` (empty values count as unset).
+    fn env_of(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<std::ffi::OsString> {
+        let vars: Vec<(String, String)> = vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        move |name| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.into())
+    }
+
     #[test]
-    fn paths() {
-        assert!(state_dir(Some(Path::new("/cfg/state"))).is_some());
-        assert!(default_socket_path().ends_with("ptyd.sock"));
+    fn state_dir_precedence() {
+        let cfg = Some(Path::new("/cfg/state"));
+        let all = env_of(&[("EMAX_STATE_DIR", "/env/state"), ("XDG_STATE_HOME", "/xdg"), ("HOME", "/home/u")]);
+        assert_eq!(state_dir_in(&all, cfg), Some(PathBuf::from("/env/state")), "the environment wins");
+        let no_override = env_of(&[("EMAX_STATE_DIR", ""), ("XDG_STATE_HOME", "/xdg"), ("HOME", "/home/u")]);
+        assert_eq!(state_dir_in(&no_override, cfg), Some(PathBuf::from("/cfg/state")), "then the configuration");
+        assert_eq!(state_dir_in(&no_override, None), Some(PathBuf::from("/xdg/emax")), "then XDG_STATE_HOME");
+        let home = env_of(&[("XDG_STATE_HOME", ""), ("HOME", "/home/u")]);
+        assert_eq!(state_dir_in(&home, None), Some(PathBuf::from("/home/u/.local/state/emax")), "then ~/.local/state");
+        assert_eq!(state_dir_in(&env_of(&[]), None), None);
         assert_eq!(session_file_path(Path::new("/s")), PathBuf::from("/s/session.json"));
+    }
+
+    #[test]
+    fn socket_path_precedence() {
+        let cfg = Some(Path::new("/cfg/d.sock"));
+        let tmp = Path::new("/tmpdir");
+        let env = env_of(&[("EMAX_PTYD_SOCKET", "/env/d.sock")]);
+        assert_eq!(socket_path_in(&env, cfg, tmp), PathBuf::from("/env/d.sock"), "the environment wins, as for state_dir");
+        let none = env_of(&[("EMAX_PTYD_SOCKET", "")]);
+        assert_eq!(socket_path_in(&none, cfg, tmp), PathBuf::from("/cfg/d.sock"));
+        // SAFETY: getuid has no preconditions.
+        let uid = unsafe { libc::getuid() };
+        assert_eq!(socket_path_in(&none, None, tmp), PathBuf::from(format!("/tmpdir/emax-{uid}/ptyd.sock")), "a per-user directory");
     }
 
     // ------------------------------------------------- snapshot and restore
@@ -805,16 +887,15 @@ mod tests {
         let msg = ed.message.clone().unwrap();
         // The ended session is always reported.
         assert!(msg.contains("*term*<2> (session 77"), "{msg}");
-        // The live one is reattached (once terminal buffers can attach), or
-        // reported with the reason.
-        let attached = ed.buffer_ids().into_iter().find(|&id| ed.is_terminal(id));
-        match attached {
-            Some(id) => {
-                assert_eq!(ed.terminal(id).unwrap().session, live);
-                assert!(h.session(live).unwrap().attached);
-            }
-            None => assert!(msg.contains(&format!("*term* (session {}", live.0)), "{msg}"),
-        }
+        // The live one is reattached, under its name, and shows its replay.
+        assert!(!msg.contains(&format!("*term* (session {}", live.0)), "{msg}");
+        let id = ed.buffer_ids().into_iter().find(|&id| ed.is_terminal(id)).expect("the live terminal is reattached");
+        assert_eq!(ed.buffer_name(id), Some("*term*"));
+        assert_eq!(ed.terminal(id).unwrap().session, live);
+        assert!(h.session(live).unwrap().attached);
+        assert_eq!(ed.buffer_ids().into_iter().filter(|&id| ed.is_terminal(id)).count(), 1, "the ended one is not");
+        ed.poll_pty();
+        assert!(ed.terminal(id).unwrap().term.text().0.contains("$ earlier output"));
 
         // Without a persistent backend, terminals are not reattached.
         let mut ed = Editor::new(Buffer::from_str("*scratch*", ""));
@@ -838,9 +919,75 @@ mod tests {
         ed.set_waker(Arc::new(move || {
             w.fetch_add(1, Ordering::SeqCst);
         }));
+        // Installing a waker wakes the view once (output may be waiting).
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        ed.tick(std::time::Instant::now());
         let id = ed.pty_backend().unwrap().spawn(SpawnSpec::default()).unwrap();
         h.output(id, b"x");
-        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(wakes.load(Ordering::SeqCst), 2);
+    }
+
+    /// `main`'s startup: restore only with `restore_session` on, no files
+    /// named and a session file present; `emax file` neither restores nor
+    /// overwrites the saved workspace; config problems keep the echo area.
+    #[test]
+    fn startup_restores_and_saves_only_without_files() {
+        let dir = temp_dir("startup");
+        let path = session_file_path(&dir.join("state"));
+        save(&path, &workspace(&dir).session_snapshot()).unwrap();
+        let saved = std::fs::read(&path).unwrap();
+        let fresh = |restore: bool| {
+            let mut ed = Editor::new(Buffer::from_str("*scratch*", ""));
+            ed.session_config.restore_session = restore;
+            ed.message = Some("startup".into());
+            ed
+        };
+        let saves_on_quit = |ed: &Editor| ed.hooks.handler_names(EventKind::KillEmacs).contains(&SAVE_HOOK);
+        let has_notes = |ed: &Editor| ed.buffer_ids().into_iter().any(|id| ed.buffer_name(id) == Some("*notes*"));
+
+        // `emax file`: nothing restored, and quitting leaves the file alone.
+        let mut ed = fresh(true);
+        assert!(ed.startup_session(Some(path.clone()), true, false).is_none());
+        assert!(!has_notes(&ed) && !saves_on_quit(&ed));
+        assert_eq!(ed.message.as_deref(), Some("startup"));
+        ed.execute("save-buffers-kill-terminal", Args::default());
+        assert_eq!(std::fs::read(&path).unwrap(), saved, "the saved workspace is untouched");
+
+        // restore_session off, or no state directory: the same.
+        let mut ed = fresh(false);
+        assert!(ed.startup_session(Some(path.clone()), false, false).is_none());
+        assert!(!has_notes(&ed) && !saves_on_quit(&ed));
+        let mut ed = fresh(true);
+        assert!(ed.startup_session(None, false, false).is_none());
+        assert!(!saves_on_quit(&ed));
+
+        // Plain `emax`: restored, the summary shown, saved on quit.
+        let mut ed = fresh(true);
+        assert!(ed.startup_session(Some(path.clone()), false, false).is_none());
+        assert!(has_notes(&ed) && saves_on_quit(&ed));
+        assert_ne!(ed.message.as_deref(), Some("startup"));
+        // Config problems keep their message.
+        let mut ed = fresh(true);
+        assert!(ed.startup_session(Some(path.clone()), false, true).is_none());
+        assert!(has_notes(&ed));
+        assert_eq!(ed.message.as_deref(), Some("startup"));
+
+        // No session yet: the startup message stays; it is saved on quit.
+        let new_path = session_file_path(&dir.join("other"));
+        let mut ed = fresh(true);
+        assert!(ed.startup_session(Some(new_path.clone()), false, false).is_none());
+        assert_eq!(ed.message.as_deref(), Some("startup"));
+        ed.execute("save-buffers-kill-terminal", Args::default());
+        assert!(new_path.exists());
+
+        // A corrupt file: reported (and returned for logging), set aside.
+        std::fs::write(&path, "{ corrupt").unwrap();
+        let mut ed = fresh(true);
+        let e = ed.startup_session(Some(path.clone()), false, false).expect("an error");
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+        assert!(ed.message.clone().unwrap().starts_with("Session not restored"));
+        assert!(saves_on_quit(&ed));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

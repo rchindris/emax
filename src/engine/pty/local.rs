@@ -77,8 +77,9 @@ pub struct LocalBackend {
 /// What a session's threads and the backend share.
 struct Shared {
     state: Mutex<State>,
-    /// Signalled when the process exits.
-    exited: Condvar,
+    /// Signalled when the process exits, the session is killed, or its
+    /// output is resumed.
+    changed: Condvar,
     /// Fired by the waiter once the process is reaped (stops reader and writer).
     cancel: Cancel,
     /// The child's pid; 0 until it has been spawned.
@@ -91,6 +92,8 @@ struct Shared {
 struct State {
     attached: bool,
     killed: bool,
+    /// Output held back (`PtyBackend::pause_output`): the reader waits.
+    paused: bool,
     /// Set by the waiter when the process has been reaped.
     exit: Option<ExitStatus>,
     /// Set by the reader once all output has been read and handled.
@@ -102,13 +105,32 @@ struct State {
 struct Session {
     spec: SpawnSpec,
     size: PtySize,
-    /// Kept open so the PTY lives as long as the session.
-    _master: Box<dyn MasterPty + Send>,
+    /// Kept open so the PTY lives as long as the process; closed (with
+    /// `fd`) once it has exited and all its output has been read.
+    master: Option<Box<dyn MasterPty + Send>>,
     /// The duplicate of the master the I/O threads use (non-blocking).
-    fd: Arc<OwnedFd>,
-    input: Sender<Vec<u8>>,
+    fd: Option<Arc<OwnedFd>>,
+    input: Sender<Input>,
     shared: Arc<Shared>,
     threads: Vec<JoinHandle<()>>,
+}
+
+impl Session {
+    /// Once the process has exited and its output has all been read, close
+    /// the PTY and join the finished I/O threads (an exited session stays
+    /// listed until it is killed, possibly for a long time in the daemon).
+    fn release_if_finished(&mut self) {
+        if !self.shared.lock().done {
+            return;
+        }
+        self.master = None;
+        self.fd = None;
+        let (done, running): (Vec<_>, Vec<_>) = self.threads.drain(..).partition(|h| h.is_finished());
+        self.threads = running;
+        for h in done {
+            let _ = h.join();
+        }
+    }
 }
 
 impl Shared {
@@ -128,7 +150,7 @@ impl Shared {
             if now >= deadline {
                 return false;
             }
-            st = self.exited.wait_timeout(st, deadline - now).unwrap_or_else(|e| e.into_inner()).0;
+            st = self.changed.wait_timeout(st, deadline - now).unwrap_or_else(|e| e.into_inner()).0;
         }
         true
     }
@@ -184,13 +206,24 @@ impl LocalBackend {
         self.sessions.get(&id).ok_or_else(|| not_found(id))
     }
 
-    /// Join the threads of killed sessions that have finished.
+    /// Join the threads of killed sessions that have finished, and release
+    /// what exited sessions no longer need.
     fn reap_dying(&mut self) {
         let (done, running): (Vec<_>, Vec<_>) = self.dying.drain(..).partition(|h| h.is_finished());
         self.dying = running;
         for h in done {
             let _ = h.join();
         }
+        for s in self.sessions.values_mut() {
+            s.release_if_finished();
+        }
+    }
+
+    /// Whether a session still holds its PTY open (tests check that an
+    /// exited session lets go of it).
+    #[cfg(test)]
+    pub(crate) fn holds_pty(&self, id: SessionId) -> bool {
+        self.sessions.get(&id).is_some_and(|s| s.master.is_some() || s.fd.is_some())
     }
 
     fn spawn_thread(&self, name: String, f: impl FnOnce() + Send + 'static) -> io::Result<JoinHandle<()>> {
@@ -281,6 +314,7 @@ impl Reader {
         let mut draining = false;
         let mut drained = 0;
         loop {
+            self.wait_while_paused();
             let n = match fill(fd, &mut buf) {
                 Ok(0) if draining => break,
                 Ok(0) => match sys::wait_fd(fd, false, self.shared.cancel.fd()) {
@@ -305,6 +339,15 @@ impl Reader {
             }
         }
         self.finish();
+    }
+
+    /// Block while the session's output is held back (a killed session is
+    /// never held: its output must be read for it to finish exiting).
+    fn wait_while_paused(&self) {
+        let mut st = self.shared.lock();
+        while st.paused && !st.killed {
+            st = self.shared.changed.wait(st).unwrap_or_else(|e| e.into_inner());
+        }
     }
 
     /// Report a chunk if the session is attached. Killed sessions (and all
@@ -348,7 +391,7 @@ impl Reader {
     fn finish(&self) {
         let mut st = self.shared.lock();
         while st.exit.is_none() {
-            st = self.shared.exited.wait(st).unwrap_or_else(|e| e.into_inner());
+            st = self.shared.changed.wait(st).unwrap_or_else(|e| e.into_inner());
         }
         st.done = true;
         if st.attached && !st.killed && !st.exit_reported {
@@ -378,21 +421,34 @@ fn fill(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
     Ok(n)
 }
 
-fn writer_loop(fd: Arc<OwnedFd>, input: Receiver<Vec<u8>>, shared: Arc<Shared>) {
-    // Ends when the session is forgotten (sender dropped) or the process exits.
-    while let Ok(bytes) = input.recv() {
+fn writer_loop(fd: Arc<OwnedFd>, input: Receiver<Input>, shared: Arc<Shared>) {
+    // Ends when the session is forgotten (sender dropped) or the process
+    // exits (the waiter sends `Input::Exited`, so an exited session that is
+    // never killed doesn't keep this thread waiting for input).
+    while let Ok(Input::Bytes(bytes)) = input.recv() {
         if sys::write_all(fd.as_raw_fd(), &bytes, shared.cancel.fd()).is_err() {
             break;
         }
     }
 }
 
-fn waiter_loop(shared: Arc<Shared>) {
+/// What a session's writer thread is sent.
+enum Input {
+    Bytes(Vec<u8>),
+    /// The process has exited: stop.
+    Exited,
+}
+
+fn waiter_loop(shared: Arc<Shared>, writer: Option<Sender<Input>>) {
     let status = sys::wait_pid(shared.pid()).unwrap_or(ExitStatus { code: 1, signal: None });
     shared.lock().exit = Some(status);
-    shared.exited.notify_all();
-    // Wake the reader (to drain and finish) and the writer (to give up).
+    shared.changed.notify_all();
+    // Wake the reader (to drain and finish) and the writer (to give up,
+    // whether it is writing or waiting for input).
     shared.cancel.fire();
+    if let Some(w) = writer {
+        let _ = w.send(Input::Exited);
+    }
 }
 
 /// Signal a session's process group: SIGHUP (plus SIGCONT, so a stopped
@@ -417,7 +473,7 @@ impl PtyBackend for LocalBackend {
         let fd = Self::io_fd(&*pair.master)?;
         let shared = Arc::new(Shared {
             state: Mutex::new(State { attached: true, ..Default::default() }),
-            exited: Condvar::new(),
+            changed: Condvar::new(),
             cancel: Cancel::new()?,
             pid: AtomicU32::new(0),
             bytes_read: AtomicUsize::new(0),
@@ -449,7 +505,7 @@ impl PtyBackend for LocalBackend {
             Err(e) => {
                 // Nothing ran: stop the reader as if a process had exited.
                 shared.lock().exit = Some(ExitStatus { code: 127, signal: None });
-                shared.exited.notify_all();
+                shared.changed.notify_all();
                 shared.cancel.fire();
                 let _ = reader.join();
                 return Err(e);
@@ -460,8 +516,8 @@ impl PtyBackend for LocalBackend {
         let mut threads = vec![reader];
         let waiter = shared.clone();
         let (input, input_rx) = mpsc::channel();
-        let (wfd, wshared) = (fd.clone(), shared.clone());
-        let more = self.spawn_thread(format!("pty-wait-{pid}"), move || waiter_loop(waiter)).and_then(|w| {
+        let (wfd, wshared, exit_tx) = (fd.clone(), shared.clone(), input.clone());
+        let more = self.spawn_thread(format!("pty-wait-{pid}"), move || waiter_loop(waiter, Some(exit_tx))).and_then(|w| {
             threads.push(w);
             self.spawn_thread(format!("pty-write-{pid}"), move || writer_loop(wfd, input_rx, wshared))
         });
@@ -471,14 +527,14 @@ impl PtyBackend for LocalBackend {
                 // Out of threads: don't leave the process running unreaped.
                 sys::signal_group(pid, libc::SIGKILL);
                 if threads.len() == 1 {
-                    waiter_loop(shared.clone());
+                    waiter_loop(shared.clone(), None);
                 }
                 threads.into_iter().for_each(|t| drop(t.join()));
                 return Err(e);
             }
         }
         let size = spec.size;
-        self.sessions.insert(id, Session { spec, size, _master: pair.master, fd, input, shared, threads });
+        self.sessions.insert(id, Session { spec, size, master: Some(pair.master), fd: Some(fd), input, shared, threads });
         Ok(id)
     }
 
@@ -506,6 +562,15 @@ impl PtyBackend for LocalBackend {
         Ok(())
     }
 
+    fn pause_output(&mut self, id: SessionId, paused: bool) -> io::Result<()> {
+        let s = self.session(id)?;
+        s.shared.lock().paused = paused;
+        if !paused {
+            s.shared.changed.notify_all();
+        }
+        Ok(())
+    }
+
     fn write(&mut self, id: SessionId, bytes: &[u8]) -> io::Result<()> {
         let s = self.session(id)?;
         if s.shared.lock().exit.is_some() {
@@ -514,14 +579,14 @@ impl PtyBackend for LocalBackend {
         if bytes.is_empty() {
             return Ok(());
         }
-        s.input.send(bytes.to_vec()).map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "process input is closed"))
+        s.input.send(Input::Bytes(bytes.to_vec())).map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "process input is closed"))
     }
 
     fn resize(&mut self, id: SessionId, size: PtySize) -> io::Result<()> {
         let size = PtySize { cols: size.cols.max(1), rows: size.rows.max(1), ..size };
         let s = self.sessions.get_mut(&id).ok_or_else(|| not_found(id))?;
-        if s.shared.lock().exit.is_none() {
-            sys::set_winsize(s.fd.as_raw_fd(), size.cols, size.rows, size.pixel_width, size.pixel_height)?;
+        if let Some(fd) = s.fd.as_ref().filter(|_| s.shared.lock().exit.is_none()) {
+            sys::set_winsize(fd.as_raw_fd(), size.cols, size.rows, size.pixel_width, size.pixel_height)?;
         }
         s.size = size;
         Ok(())
@@ -530,6 +595,7 @@ impl PtyBackend for LocalBackend {
     fn kill(&mut self, id: SessionId) -> io::Result<()> {
         let s = self.sessions.remove(&id).ok_or_else(|| not_found(id))?;
         s.shared.lock().killed = true;
+        s.shared.changed.notify_all(); // a paused reader goes on (discarding)
         self.local.retain(|e| event_session(e) != id);
         let Session { input, shared, mut threads, .. } = s;
         // The writer stops; the reader keeps discarding output until the
@@ -581,7 +647,10 @@ impl PtyBackend for LocalBackend {
                 },
             };
             // Killed sessions are forgotten: drop whatever they still queued.
-            if self.sessions.contains_key(&event_session(&e)) {
+            if let Some(s) = self.sessions.get_mut(&event_session(&e)) {
+                if matches!(e, PtyEvent::Exited(..)) {
+                    s.release_if_finished();
+                }
                 return Some(e);
             }
         }
@@ -603,6 +672,7 @@ impl Drop for LocalBackend {
         let mut shared = Vec::new();
         for (_, s) in sessions {
             s.shared.lock().killed = true;
+            s.shared.changed.notify_all();
             let Session { input, shared: sh, threads: t, .. } = s;
             drop(input);
             if sh.lock().exit.is_none() {

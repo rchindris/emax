@@ -86,10 +86,23 @@ impl Editor {
     /// Make buffer `id` current. With `bury`, the old current buffer goes to the
     /// end of the list (so repeated previous-buffer cycles); otherwise to the front.
     pub fn switch_to_buffer_ex(&mut self, id: u64, bury: bool) -> bool {
-        if id == self.buf_id {
-            return true;
+        match self.switch_quietly(id, bury) {
+            Some(true) => {
+                self.emit(Event::WindowConfigurationChanged);
+                true
+            }
+            Some(false) => true,
+            None => false,
         }
-        let Some(i) = self.others.iter().position(|s| s.id == id) else { return false };
+    }
+
+    /// Make buffer `id` current without reporting the window change: `None`
+    /// if there is no such buffer, else whether the selected window changed.
+    fn switch_quietly(&mut self, id: u64, bury: bool) -> Option<bool> {
+        if id == self.buf_id {
+            return Some(false);
+        }
+        let i = self.others.iter().position(|s| s.id == id)?;
         let slot = self.others.remove(i);
         let old = self.park_current(slot);
         if bury {
@@ -99,8 +112,7 @@ impl Editor {
         }
         self.scroll = Scroll::Keep;
         self.last_command = "";
-        self.sync_selected_window();
-        true
+        Some(self.sync_selected_window_quietly())
     }
 
     pub fn switch_to_buffer(&mut self, id: u64) -> bool {
@@ -137,16 +149,19 @@ impl Editor {
                 None => return,
             }
         };
+        // Every window that showed it changes: one event for all of them.
+        let mut changed = false;
         if id == self.buf_id {
             if self.others.is_empty() {
                 self.add_buffer(Buffer::from_str("*scratch*", ""));
             }
             let next = self.others[0].id;
-            self.switch_to_buffer(next);
+            changed |= self.switch_quietly(next, false).unwrap_or(false);
         }
         self.others.retain(|s| s.id != id);
         let replacement = self.buf_id;
-        if self.layout.replace_buffer(id, replacement) {
+        changed |= self.layout.replace_buffer(id, replacement);
+        if changed {
             self.emit(Event::WindowConfigurationChanged);
         }
         self.terminal_buffer_killed(id);

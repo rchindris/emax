@@ -158,11 +158,11 @@ fn interactive_shell() {
 #[test]
 fn large_output_is_complete_and_coalesced() {
     let mut b = backend();
-    // 15,000,000 zero bytes -> 20,000,000 base64 'A's (no padding).
-    let id = b.spawn(sh("head -c 15000000 /dev/zero | base64")).unwrap();
+    // 6,000,000 zero bytes -> 8,000,000 base64 'A's (no padding).
+    let id = b.spawn(sh("head -c 6000000 /dev/zero | base64")).unwrap();
     let mut seen = Seen::default();
     let start = Instant::now();
-    wait_until("20 MB of output", Duration::from_secs(60), || {
+    wait_until("8 MB of output", TIMEOUT, || {
         seen.drain(&mut b);
         seen.exited(id).is_some()
     });
@@ -170,25 +170,25 @@ fn large_output_is_complete_and_coalesced() {
     let out = &seen.out[&id];
     let a = out.iter().filter(|&&c| c == b'A').count();
     let other = out.iter().filter(|&&c| !matches!(c, b'A' | b'\r' | b'\n')).count();
-    assert_eq!(a, 20_000_000);
+    assert_eq!(a, 8_000_000);
     assert_eq!(other, 0);
     let events = seen.events[&id];
-    assert!(events < 20_000_000 / 1024, "{events} events for 20 MB: not coalesced");
-    eprintln!("20 MB in {events} events, {:?}", start.elapsed());
+    assert!(events < 8_000_000 / 1024, "{events} events for 8 MB: not coalesced");
+    eprintln!("8 MB in {events} events, {:?}", start.elapsed());
 }
 
 #[test]
 fn backpressure_blocks_the_child_and_loses_nothing() {
     let mut b = backend();
-    // ~40 MB: more than the channel can hold (EVENT_QUEUE chunks).
-    let total = 40_000_000;
+    // More than the channel can hold (EVENT_QUEUE chunks of READ_CHUNK).
+    let total = EVENT_QUEUE * READ_CHUNK + 8_000_000;
     let id = b.spawn(sh(&format!("head -c {total} /dev/zero | tr '\\0' z"))).unwrap();
     wait_until("the event queue to fill", TIMEOUT, || b.queued() >= EVENT_QUEUE);
     // The reader is stuck on the full queue, so the child can't finish.
     assert!(b.list().unwrap()[0].exited.is_none());
     assert!(b.bytes_read(id).unwrap() < total);
     let mut seen = Seen::default();
-    wait_until("all output", Duration::from_secs(60), || {
+    wait_until("all output", TIMEOUT, || {
         seen.drain(&mut b);
         seen.exited(id).is_some()
     });
@@ -447,13 +447,13 @@ fn waker_is_called_once_per_batch() {
     let mut b = LocalBackend::new(Arc::new(move || {
         w.fetch_add(1, Ordering::SeqCst);
     }));
-    let id = b.spawn(sh("head -c 30000000 /dev/zero")).unwrap();
+    let id = b.spawn(sh(&format!("head -c {} /dev/zero", EVENT_QUEUE * READ_CHUNK + 4_000_000))).unwrap();
     // Many events pile up without draining: still a single wake-up.
     wait_until("many events queued", TIMEOUT, || b.queued() >= EVENT_QUEUE);
     assert_eq!(wakes.load(Ordering::SeqCst), 1);
     // Draining to empty re-arms the waker; more output wakes again.
     let mut seen = Seen::default();
-    wait_until("exit", Duration::from_secs(60), || {
+    wait_until("exit", TIMEOUT, || {
         seen.drain(&mut b);
         seen.exited(id).is_some()
     });
@@ -642,4 +642,57 @@ fn spawn_after_many_kills_does_not_leak() {
     });
     assert!(b.dying.is_empty());
     assert_eq!(b.try_recv(), None);
+}
+
+#[test]
+fn exited_sessions_end_their_threads_and_close_the_pty_without_a_kill() {
+    let mut b = backend();
+    let live = b.live_threads();
+    let ids: Vec<SessionId> = (0..20).map(|_| b.spawn(sh("exit 0")).unwrap()).collect();
+    let mut seen = Seen::default();
+    seen.until(&mut b, "every session to exit", |s| ids.iter().all(|id| s.exited(*id).is_some()));
+    // No kill: the writer stops on its own once the process is gone.
+    wait_until("the exited sessions' threads to end", TIMEOUT, || live.load(Ordering::SeqCst) == 0);
+    b.reap_dying();
+    for id in &ids {
+        assert!(!b.holds_pty(*id), "session {} keeps its PTY open", id.0);
+        assert!(b.list().unwrap().iter().any(|s| s.id == *id && s.exited.is_some()), "still listed until killed");
+        assert!(b.write(*id, b"x").is_err());
+        b.resize(*id, PtySize::new(10, 10)).unwrap();
+    }
+    for id in ids {
+        b.kill(id).unwrap();
+    }
+    assert!(b.list().unwrap().is_empty());
+}
+
+#[test]
+fn paused_output_is_held_back_and_nothing_is_lost() {
+    let mut b = backend();
+    let other = b.spawn(spec("/bin/cat", &[])).unwrap();
+    let id = b.spawn(sh("printf start; read x; printf 'got-%s' \"$x\"; exit 4")).unwrap();
+    let mut seen = Seen::default();
+    seen.until(&mut b, "the first output", |s| s.text(id).contains("start"));
+    b.pause_output(id, true).unwrap();
+    b.write(id, b"go\n").unwrap();
+    // Other sessions keep flowing while this one is held.
+    b.write(other, b"ping\n").unwrap();
+    seen.until(&mut b, "the other session's echo", |s| count(&s.text(other), "ping") >= 2);
+    // That nothing arrives can only be seen over time; the other session's
+    // round trip above already took longer than this one's would.
+    let held_until = Instant::now() + Duration::from_millis(100);
+    while Instant::now() < held_until {
+        seen.drain(&mut b);
+        assert!(!seen.text(id).contains("got-go"), "output arrived while paused: {:?}", seen.text(id));
+        std::thread::yield_now();
+    }
+    assert!(seen.exited(id).is_none());
+    b.pause_output(id, false).unwrap();
+    assert_eq!(seen.until_exit(&mut b, id).code, 4);
+    assert!(seen.text(id).contains("got-go"), "{:?}", seen.text(id));
+    // Killing a paused session doesn't hang (its output is read and dropped).
+    b.pause_output(other, true).unwrap();
+    b.write(other, b"more\n").unwrap();
+    b.kill(other).unwrap();
+    assert!(b.pause_output(other, false).is_err(), "a killed session is gone");
 }

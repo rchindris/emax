@@ -223,6 +223,25 @@ fn escape_keys_reach_the_editor() {
 }
 
 #[test]
+fn global_tab_keys_switch_tabs_from_a_terminal() {
+    let mut x = t();
+    let term = x.term();
+    x.ed.execute("tab-new", Args::default());
+    x.ed.switch_to_buffer(term);
+    assert_eq!(x.ed.layout.current_tab, 1);
+    x.keys("C-TAB");
+    assert_eq!(x.ed.layout.current_tab, 0, "C-TAB is tab-next, not a TAB for the program");
+    x.ed.switch_to_buffer(term);
+    x.keys("C-S-TAB");
+    assert_eq!(x.ed.layout.current_tab, 1);
+    assert!(x.input(term).is_empty(), "nothing reached the program: {:?}", x.input(term));
+    // Plain TAB and S-TAB are still the program's.
+    x.ed.switch_to_buffer(term);
+    x.keys("TAB S-TAB");
+    assert_eq!(x.input(term), b"\t\x1b[Z");
+}
+
+#[test]
 fn terminal_keymap_commands() {
     let mut x = t();
     let term = x.term();
@@ -640,4 +659,68 @@ fn attach_terminal_of_an_exited_session() {
     x.tick();
     assert_eq!(x.rows(id)[0], "done");
     assert!(x.ed.terminal(id).unwrap().exited.is_some());
+}
+
+#[test]
+fn one_window_sizes_each_shared_terminal() {
+    let mut x = t();
+    let a = x.term();
+    let b = x.term();
+    let notes = 1;
+    assert_eq!(x.ed.buffer_name(notes), Some("notes"));
+    // Three windows: b (selected), b, then notes; then a in a fourth.
+    x.keys("C-x 2 C-x 2");
+    let order = x.ed.layout.window_order();
+    assert_eq!(order.len(), 3);
+    x.ed.select_window(order[2]);
+    x.ed.switch_to_buffer(notes);
+    x.ed.select_window(order[1]);
+    let owners = x.ed.terminal_owners(&order);
+    assert_eq!(owners.len(), 1, "notes is no terminal: {owners:?}");
+    assert_eq!(owners[&b], order[1], "the selected window, though another shows it first");
+    // Not selected: the first window (in order) showing it.
+    x.ed.select_window(order[2]);
+    assert_eq!(x.ed.terminal_owners(&order)[&b], order[0]);
+    // Each terminal has its own owner.
+    x.ed.switch_to_buffer(a);
+    let owners = x.ed.terminal_owners(&order);
+    assert_eq!((owners[&a], owners[&b]), (order[2], order[0]));
+    // Only windows on screen count (plus the selected one).
+    assert_eq!(x.ed.terminal_owners(&[]).keys().copied().collect::<Vec<_>>(), [a]);
+}
+
+#[test]
+fn grid_size_counts_whole_cells() {
+    use crate::engine::term::grid_size;
+    assert_eq!(grid_size(800.0, 480.0, 8.0, 20.0), (100, 24));
+    assert_eq!(grid_size(807.9, 499.0, 8.0, 20.0), (100, 24), "partial cells don't count");
+    assert_eq!(grid_size(3.0, 3.0, 8.0, 20.0), (1, 1), "at least one cell");
+    assert_eq!(grid_size(-50.0, 0.0, 8.0, 20.0), (1, 1));
+    assert_eq!(grid_size(100.0, 100.0, 0.0, 0.0), (100, 100), "cells are at least a pixel");
+    assert_eq!(grid_size(f32::INFINITY, f32::NAN, 8.0, 20.0), (1, 1));
+    assert_eq!(grid_size(1e9, 1e9, 1.0, 1.0), (u16::MAX, u16::MAX));
+}
+
+#[test]
+fn an_unreachable_daemon_falls_back_to_local_processes() {
+    let dir = crate::engine::testutil::temp_dir("fallback");
+    let not_a_dir = dir.join("file");
+    std::fs::write(&not_a_dir, "x").unwrap();
+    let mut ed = Editor::new(Buffer::from_str("notes", ""));
+    let cfg = TerminalConfig {
+        backend: crate::engine::config::PtyBackendKind::Daemon,
+        socket: Some(not_a_dir.join("d.sock")),
+        ..config("/bin/sh")
+    };
+    ed.set_terminal_config(Arc::new(cfg));
+    let b = ed.pty_backend().expect("a backend all the same");
+    assert!(!b.persistent(), "processes run locally");
+    let msg = ed.message.clone().unwrap_or_default();
+    assert!(msg.starts_with("Session daemon unavailable") && msg.contains("end with the editor"), "{msg}");
+    // Terminals work.
+    ed.execute("term", Args::default());
+    assert!(ed.is_terminal(ed.buf_id), "{:?}", ed.message);
+    let buf = ed.buf_id;
+    ed.kill_buffer(buf);
+    std::fs::remove_dir_all(dir).unwrap();
 }

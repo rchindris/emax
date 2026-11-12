@@ -6,6 +6,7 @@
 //! text into the buffer, read-only, for normal motion, search and copying;
 //! `C-c C-k` goes back to char mode.
 
+use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 
@@ -19,7 +20,7 @@ use crate::engine::hooks::Event;
 use crate::engine::keymap::Key;
 use crate::engine::modes::MinorMode;
 use crate::engine::pty::{ExitStatus, PtyBackend, PtyEvent, PtySize, SessionId, SpawnSpec};
-use crate::engine::window::Window;
+use crate::engine::window::{Window, WindowId};
 
 /// Output `poll_pty` feeds per call before yielding (another tick follows),
 /// so a flood can't freeze the UI.
@@ -267,6 +268,21 @@ impl Editor {
             self.message = Some(e);
         }
         true
+    }
+
+    /// For each terminal buffer shown in `windows` (the current tab's, in
+    /// order), the window whose size it takes: the selected window if it
+    /// shows it, else the first one that does. Only that window resizes it,
+    /// so two windows on one terminal never fight over its size.
+    pub fn terminal_owners(&self, windows: &[WindowId]) -> HashMap<BufferId, WindowId> {
+        let mut owners = HashMap::new();
+        let sel = self.layout.selected();
+        for &win in std::iter::once(&sel).chain(windows) {
+            if let Some(b) = self.layout.window(win).map(|w| w.buffer).filter(|&b| self.is_terminal(b)) {
+                owners.entry(b).or_insert(win);
+            }
+        }
+        owners
     }
 
     /// The window showing `buf` is `cols`×`rows` cells. Resizes the terminal

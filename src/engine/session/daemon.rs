@@ -14,11 +14,13 @@
 //! detached from its sessions; the processes keep running and their output
 //! keeps going into the ring.
 //!
-//! Flow control: if a client stops reading, its queue grows; past
-//! [`HIGH_WATER`] the daemon stops reading from the backend, whose bounded
-//! channel then fills, so the programs block on output instead of the
-//! daemon's memory growing without bound. Reading resumes when the client
-//! catches up (or disconnects).
+//! Flow control, per session: if a client stops reading, its queue grows;
+//! past [`HIGH_WATER`] the daemon holds back the output of the sessions that
+//! client is attached to ([`PtyBackend::pause_output`]), so those programs
+//! block on output instead of the daemon's memory growing without bound.
+//! Their output flows again when the client catches up (or disconnects).
+//! Other sessions are not affected: one stalled client never stops output
+//! that only other clients are waiting for.
 //!
 //! The socket's directory is created with mode 0700; a directory owned by
 //! another user (other than root, e.g. `/tmp`) is refused. A lock file next
@@ -58,8 +60,8 @@ pub struct DaemonOptions {
 /// The replay buffer size when `--replay-bytes` is not given.
 pub const DEFAULT_REPLAY_BYTES: usize = 2 << 20;
 
-/// Once a client has this many bytes queued, the daemon stops reading
-/// program output until it catches up.
+/// Once a client has this many bytes queued, the daemon holds back the
+/// output of the sessions it is attached to until it catches up.
 pub const HIGH_WATER: usize = 8 << 20;
 
 /// Backend events handled before the main loop looks at its channel again.
@@ -204,6 +206,48 @@ fn prepare_dir(dir: &Path) -> io::Result<()> {
     }
 }
 
+/// The user id of the process at the other end of a Unix socket.
+pub fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+    {
+        let (mut uid, mut gid) = (0, 0);
+        // SAFETY: a valid socket descriptor and pointers to two locals.
+        if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(uid)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd")))]
+    {
+        let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: a valid socket descriptor and a buffer of the size given.
+        let r = unsafe {
+            libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, (&raw mut cred).cast(), &mut len)
+        };
+        if r != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(cred.uid)
+    }
+}
+
+/// Refuse a peer run by another user: a socket configured in a shared
+/// directory (e.g. `/tmp`) could have been bound by someone else first, who
+/// would then see every keystroke typed into the terminals.
+pub fn check_peer(stream: &UnixStream) -> io::Result<()> {
+    let peer = peer_uid(stream)?;
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    if peer != uid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("the session socket belongs to another user (uid {peer})"),
+        ));
+    }
+    Ok(())
+}
+
 /// An exclusive `flock` on `path`, held as long as the file is open
 /// (inherited across `fork`, so the daemonized child keeps it).
 fn take_lock(path: &Path) -> io::Result<File> {
@@ -293,6 +337,8 @@ struct Session {
     exited: Option<ExitStatus>,
     /// Connections attached to it.
     clients: BTreeSet<u64>,
+    /// Its output is held back (an attached client is too far behind).
+    paused: bool,
 }
 
 struct Daemon {
@@ -313,11 +359,34 @@ fn accept_loop(listener: UnixListener, tx: Sender<Input>, stop: Arc<AtomicBool>)
         if stop.load(Ordering::SeqCst) {
             break;
         }
-        let Ok(stream) = stream else { continue };
+        let stream = match stream {
+            Ok(s) => s,
+            Err(e) => {
+                // Out of descriptors (EMFILE) and the like fail at once while
+                // the connection stays pending: wait instead of spinning.
+                if let Some(pause) = accept_backoff(&e) {
+                    thread::sleep(pause);
+                }
+                continue;
+            }
+        };
+        if check_peer(&stream).is_err() {
+            continue; // dropping it hangs up
+        }
         next += 1;
         if start_conn(next, stream, &tx).is_err() {
             continue;
         }
+    }
+}
+
+/// How long the acceptor waits after a failed `accept`: not at all for a
+/// connection that went away or an interrupted call, a moment for anything
+/// else (e.g. no descriptors left), which would otherwise fail again at once.
+fn accept_backoff(e: &io::Error) -> Option<Duration> {
+    match e.kind() {
+        io::ErrorKind::Interrupted | io::ErrorKind::ConnectionAborted => None,
+        _ => Some(Duration::from_millis(100)),
     }
 }
 
@@ -380,6 +449,7 @@ impl Daemon {
                 },
             };
             self.handle(input);
+            self.update_flow();
             self.drain();
             if self.sessions.is_empty() && self.conns.is_empty() {
                 idle_since.get_or_insert_with(Instant::now);
@@ -488,7 +558,7 @@ impl Daemon {
         let size = spec.size;
         let mut clients = BTreeSet::new();
         clients.insert(conn);
-        self.sessions.insert(id, Session { spec, size, ring: Ring::new(self.replay_bytes), exited: None, clients });
+        self.sessions.insert(id, Session { spec, size, ring: Ring::new(self.replay_bytes), exited: None, clients, paused: false });
         Ok(Reply::Spawned(id))
     }
 
@@ -544,14 +614,24 @@ impl Daemon {
             .collect()
     }
 
-    /// Some client is too far behind: stop reading program output for now.
-    fn throttled(&self) -> bool {
-        self.conns.values().any(|c| c.queued.load(Ordering::Acquire) >= HIGH_WATER)
+    /// Hold back the output of each session an attached client is too far
+    /// behind on, and let the others' flow (the writer wakes the main loop
+    /// when a client catches up; a client that goes away is detached).
+    fn update_flow(&mut self) {
+        let Daemon { sessions, conns, backend, .. } = self;
+        for (id, s) in sessions.iter_mut() {
+            let behind = s.exited.is_none()
+                && s.clients.iter().any(|c| conns.get(c).is_some_and(|c| c.queued.load(Ordering::Acquire) >= HIGH_WATER));
+            if behind != s.paused {
+                s.paused = behind;
+                let _ = backend.pause_output(*id, behind);
+            }
+        }
     }
 
     /// Move a batch of backend events into the rings and out to clients.
     fn drain(&mut self) {
-        if !self.more || self.throttled() {
+        if !self.more {
             return;
         }
         for _ in 0..DRAIN_BATCH {
@@ -559,9 +639,10 @@ impl Daemon {
                 self.more = false;
                 return;
             };
+            let output = matches!(e, PtyEvent::Output(..));
             self.event(e);
-            if self.throttled() {
-                return; // the writer wakes us when it catches up
+            if output {
+                self.update_flow();
             }
         }
         // More may be waiting: continue after whatever else is queued.
@@ -757,6 +838,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn peers_are_checked_by_user_id() {
+        let (a, b) = UnixStream::pair().unwrap();
+        // SAFETY: getuid has no preconditions.
+        assert_eq!(peer_uid(&a).unwrap(), unsafe { libc::getuid() });
+        check_peer(&b).unwrap();
+    }
+
+    #[test]
+    fn accept_errors_back_off_unless_harmless() {
+        assert_eq!(accept_backoff(&io::Error::from(io::ErrorKind::Interrupted)), None);
+        assert_eq!(accept_backoff(&io::Error::from(io::ErrorKind::ConnectionAborted)), None);
+        assert!(accept_backoff(&io::Error::from_raw_os_error(libc::EMFILE)).is_some());
+        assert!(accept_backoff(&io::Error::from_raw_os_error(libc::ENFILE)).is_some());
+    }
+
     fn daemon(backend: Box<dyn PtyBackend>) -> (Daemon, Receiver<Input>) {
         let (tx, rx) = mpsc::channel();
         let d = Daemon { backend, sessions: BTreeMap::new(), conns: HashMap::new(), replay_bytes: 100, tx, more: false, stop: false };
@@ -770,25 +867,42 @@ mod tests {
         (queued, rx)
     }
 
-    /// While a client is past the high-water mark, backend events stay in
-    /// the backend; they flow once it catches up.
+    /// While a client is past the high-water mark, the sessions it is
+    /// attached to are held back (their events stay in the backend) and the
+    /// others flow; they all flow once it catches up.
     #[test]
-    fn draining_pauses_while_a_client_lags() {
+    fn a_lagging_client_holds_back_only_its_own_sessions() {
         let (b, h) = MockBackend::new();
         let (mut d, _rx) = daemon(Box::new(b));
         let (queued, frames) = conn(&mut d, 1);
+        let (_other_queued, _other_frames) = conn(&mut d, 2);
         let Ok(Reply::Spawned(id)) = d.op(1, Op::Spawn(SpawnSpec::default())) else { panic!() };
+        let Ok(Reply::Spawned(free)) = d.op(2, Op::Spawn(SpawnSpec::default())) else { panic!() };
         h.output(id, b"abc");
+        h.output(free, b"xyz");
         d.more = true;
         queued.store(HIGH_WATER, Ordering::SeqCst);
+        d.update_flow();
+        assert!(d.sessions[&id].paused && h.session(id).unwrap().paused);
+        assert!(!d.sessions[&free].paused && !h.session(free).unwrap().paused);
         d.drain();
-        assert!(d.sessions[&id].ring.is_empty(), "nothing read while throttled");
-        assert!(d.more);
+        assert!(d.sessions[&id].ring.is_empty(), "nothing read while held back");
+        assert_eq!(d.sessions[&free].ring.chunks(10).concat(), b"xyz", "the other session flows");
         queued.store(0, Ordering::SeqCst);
+        d.update_flow();
+        assert!(!h.session(id).unwrap().paused);
+        d.more = true;
         d.drain();
         assert_eq!(d.sessions[&id].ring.chunks(10).concat(), b"abc");
         assert!(!d.more, "drained to the end");
         assert_eq!(queued.load(Ordering::SeqCst), frames.try_recv().unwrap().len(), "queued bytes are counted");
+        // A client that goes away no longer holds anything back.
+        queued.store(HIGH_WATER, Ordering::SeqCst);
+        d.update_flow();
+        assert!(h.session(id).unwrap().paused);
+        d.drop_conn(1);
+        d.update_flow();
+        assert!(!h.session(id).unwrap().paused);
     }
 
     /// A long backlog is drained in batches, the daemon waking itself to go on.

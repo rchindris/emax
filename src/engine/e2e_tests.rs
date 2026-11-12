@@ -318,6 +318,61 @@ fn sessions_are_restored_into_a_new_editor_and_reattach_through_the_daemon() {
     let _ = std::fs::remove_dir_all(state);
 }
 
+/// What the view does: restore the session *before* it exists (main.rs),
+/// install its waker afterwards, and from then on tick only when woken.
+/// Output the reattach replayed while no waker was installed must not leave
+/// the backend thinking a wake-up is still pending.
+#[test]
+fn a_session_restored_before_the_view_exists_still_wakes_it() {
+    let daemon = Daemon::start();
+    let state = temp_dir("e2e-wake");
+    let file = session::session_file_path(&state);
+    let cfg = || sh_config(PtyBackendKind::Daemon, Some(daemon.socket.clone()), &[]);
+    {
+        let mut x = E::new(cfg());
+        x.ed.execute("term", Args::default());
+        let buf = x.ed.buf_id;
+        x.type_line("echo before-$((1+1))");
+        x.wait_for_line(buf, "before-2");
+        x.ed.save_session_on_quit(file.clone());
+        x.ed.execute("save-buffers-kill-terminal", Args::default());
+    }
+    wait_until("the client to detach", TIMEOUT, || daemon.live_sessions() == 1);
+
+    // No waker yet: the restore's replay wakes nobody.
+    let mut ed = Editor::new(Buffer::from_str("notes", ""));
+    ed.set_terminal_config(Arc::new(cfg()));
+    assert!(ed.restore_session_file(&file).expect("restore"));
+    let buf = ed.buf_id;
+    assert!(ed.is_terminal(buf));
+
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let w = wakes.clone();
+    ed.set_waker(Arc::new(move || {
+        w.fetch_add(1, Ordering::SeqCst);
+    }));
+    let mut x = E { ed, d: Dispatcher::new(), wakes: wakes.clone() };
+    // Like the view: tick only after a wake-up.
+    let mut seen = 0;
+    let mut tick_when_woken = |x: &mut E, what: &str, done: &dyn Fn(&E) -> bool| {
+        wait_until(what, TIMEOUT, || {
+            let n = x.wakes.load(Ordering::SeqCst);
+            if n > seen {
+                seen = n;
+                x.ed.tick(Instant::now());
+            }
+            done(x)
+        });
+    };
+    let has_line = |x: &E, line: &str| x.text(buf).lines().any(|l| l.trim_end() == line);
+    tick_when_woken(&mut x, "the replay after a wake-up", &|x| has_line(x, "before-2"));
+    x.type_line("echo live-$((2+2))");
+    tick_when_woken(&mut x, "live output after a wake-up", &|x| has_line(x, "live-4"));
+    x.ed.kill_buffer(buf);
+    wait_until("the session to end", TIMEOUT, || daemon.live_sessions() == 0);
+    let _ = std::fs::remove_dir_all(state);
+}
+
 #[test]
 fn hooks_see_terminal_events_in_order() {
     let script = "printf 'out\\033]2;the-title\\007'; printf '\\a'; exit 3";

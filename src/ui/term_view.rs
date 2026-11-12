@@ -1,5 +1,5 @@
 //! Terminal buffers on screen: draws a terminal [`Snapshot`] as a grid of
-//! cells, and works out how many cells fit in a window.
+//! cells (how many fit in a window is `term::grid_size`).
 //!
 //! Each row is split into runs of same-styled cells (`Snapshot::row_runs`)
 //! and every run is placed at its column, so the grid stays aligned whatever
@@ -24,13 +24,6 @@ pub fn measure_cell_width(window: &Window, family: impl Into<SharedString>, font
         Ok(size) if f32::from(size.width) >= 1.0 => f32::from(size.width),
         _ => cell_width(font_size),
     }
-}
-
-/// How many (cols, rows) cells fit in `width`×`height` pixels.
-pub fn grid_size(width: f32, height: f32, cell_w: f32, line_h: f32) -> (u16, u16) {
-    let cols = (width / cell_w.max(1.0)).floor().clamp(1.0, u16::MAX as f32) as u16;
-    let rows = (height / line_h.max(1.0)).floor().clamp(1.0, u16::MAX as f32) as u16;
-    (cols, rows)
 }
 
 /// The element showing `snap` with `cell_w`×`line_h`-pixel cells.

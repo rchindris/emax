@@ -18,6 +18,8 @@ pub struct MockSession {
     pub exited: Option<ExitStatus>,
     /// Sizes requested by `resize`/`attach`, in order.
     pub resizes: Vec<PtySize>,
+    /// Output held back (`pause_output`): its events stay queued.
+    pub paused: bool,
 }
 
 #[derive(Default)]
@@ -114,6 +116,12 @@ impl MockHandle {
     }
 }
 
+fn event_session(e: &PtyEvent) -> SessionId {
+    match e {
+        PtyEvent::Output(id, _) | PtyEvent::Exited(id, _) => *id,
+    }
+}
+
 fn not_found(id: SessionId) -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, format!("no session {}", id.0))
 }
@@ -198,12 +206,30 @@ impl PtyBackend for MockBackend {
             .collect())
     }
 
+    fn pause_output(&mut self, id: SessionId, paused: bool) -> io::Result<()> {
+        let mut st = self.handle.lock();
+        st.sessions.get_mut(&id).ok_or_else(|| not_found(id))?.paused = paused;
+        let waiting = st.events.iter().any(|e| event_session(e) == id);
+        drop(st);
+        if !paused && waiting {
+            self.handle.notifier.notify();
+        }
+        Ok(())
+    }
+
+    /// The oldest event of a session that isn't paused (a paused session's
+    /// events wait, as a real program's output would in its PTY).
     fn try_recv(&mut self) -> Option<PtyEvent> {
         let mut st = self.handle.lock();
-        if st.events.is_empty() {
-            self.handle.notifier.clear();
+        let ready = |st: &State, e: &PtyEvent| !st.sessions.get(&event_session(e)).is_some_and(|s| s.paused);
+        let next = st.events.iter().position(|e| ready(&st, e));
+        match next {
+            Some(i) => st.events.remove(i),
+            None => {
+                self.handle.notifier.clear();
+                None
+            }
         }
-        st.events.pop_front()
     }
 
     fn persistent(&self) -> bool {
@@ -258,6 +284,17 @@ mod tests {
         b.detach(id).unwrap();
         h.output(id, b"x");
         assert_eq!(b.try_recv(), None);
+        // Paused output waits; other sessions' doesn't.
+        b.attach(id, PtySize::new(90, 20)).unwrap();
+        assert_eq!(b.try_recv(), Some(PtyEvent::Output(id, b"earlier output".to_vec())));
+        let other = b.spawn(SpawnSpec::default()).unwrap();
+        b.pause_output(id, true).unwrap();
+        h.output(id, b"held");
+        h.output(other, b"flows");
+        assert_eq!(b.try_recv(), Some(PtyEvent::Output(other, b"flows".to_vec())));
+        assert_eq!(b.try_recv(), None);
+        b.pause_output(id, false).unwrap();
+        assert_eq!(b.try_recv(), Some(PtyEvent::Output(id, b"held".to_vec())));
         h.fail_next_spawn("nope");
         assert!(b.spawn(SpawnSpec::default()).is_err());
         assert!(b.spawn(SpawnSpec::default()).is_ok());

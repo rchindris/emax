@@ -498,6 +498,29 @@ fn scrolled_view_stays_put_while_output_arrives() {
     assert_eq!(t.display_offset(), 5);
 }
 
+#[test]
+fn region_scrolls_in_a_scrolled_back_view_keep_the_offset_within_the_history() {
+    // alacritty grows the display offset on some region scrolls without
+    // capping it; reading rows above the history must not happen.
+    let mut t = Terminal::new(10, 3, 100);
+    for i in 0..20 {
+        t.feed(format!("{i}\r\n").as_bytes());
+    }
+    t.scroll(1000);
+    let top = t.display_offset();
+    assert_eq!(top, t.history_len());
+    t.feed(b"\x1b[2;3r\x1b[2H\x1b[M");
+    assert!(t.display_offset() <= t.history_len());
+    let s = snap(&t);
+    assert_eq!(s.lines.len(), 3);
+    assert!(s.display_offset <= t.history_len());
+    // Origin mode and deleted lines after scrolling back, too.
+    t.scroll(1000);
+    t.feed(b"\x1b[?6h\x1b[2;3r\x1b[H\x1b[2M\x1b[?6l\x1b[r");
+    assert!(t.display_offset() <= t.history_len());
+    let _ = snap(&t);
+}
+
 // ------------------------------------------------------------------ resize
 
 #[test]
@@ -852,10 +875,13 @@ fn random_input_never_panics() {
             t.feed(&chunk);
             match rng.below(20) {
                 0 => t.resize(rng.below(120) as u16, rng.below(50) as u16),
-                1 => t.scroll(rng.below(200) as i32 - 100),
-                2 => t.scroll_to_bottom(),
+                1..=3 => t.scroll(rng.below(200) as i32 - 100),
+                4 => t.scroll_to_bottom(),
                 _ => {}
             }
+            // The view renders between feeds, often scrolled back.
+            assert!(t.display_offset() <= t.history_len(), "round {round}");
+            let _ = t.snapshot(&palette);
         }
         let s = t.snapshot(&palette);
         let (cols, rows) = t.size();

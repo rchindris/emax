@@ -206,7 +206,7 @@ pub struct TerminalConfig {
     pub backend: PtyBackendKind,
     /// Output the daemon keeps per session to replay on attach, in bytes.
     pub replay_bytes: usize,
-    /// The daemon's socket (`None`: `session::default_socket_path`).
+    /// The daemon's socket (`$EMAX_PTYD_SOCKET` overrides it; `None`: `session::default_socket_path`).
     pub socket: Option<PathBuf>,
     /// A daemon the editor starts exits after this long with no sessions
     /// and no editor connected (`None`: never; `0` in the file).
