@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use ropey::Rope;
 
 use super::cursor::Cursor;
+use super::modes::BufferModes;
 
 /// A primitive change: at `pos`, `old` was replaced by `new`.
 #[derive(Clone, Debug)]
@@ -33,6 +34,8 @@ pub struct Buffer {
     pub rope: Rope,
     pub path: Option<PathBuf>,
     pub name: String,
+    /// Major and minor modes, buffer-local settings (set by the editor).
+    pub modes: BufferModes,
     undo: Vec<Group>,
     redo: Vec<Group>,
     open: Option<Group>,
@@ -48,6 +51,7 @@ impl Buffer {
             rope: Rope::from_str(text),
             path: None,
             name: name.into(),
+            modes: BufferModes::default(),
             undo: Vec::new(),
             redo: Vec::new(),
             open: None,
@@ -140,6 +144,17 @@ impl Buffer {
         self.next_id += 1;
         self.undo.push(g);
         true
+    }
+
+    /// Take back the open group's changes (a read-only buffer refused them).
+    /// Returns the cursors from before, if anything had changed.
+    pub fn abort_group(&mut self) -> Option<Vec<Cursor>> {
+        let g = self.open.take()?;
+        if g.edits.is_empty() {
+            return None;
+        }
+        self.apply_inverse(&g.edits);
+        Some(g.before)
     }
 
     /// Break amalgamation so the next self-insert starts a new undo group.

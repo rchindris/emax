@@ -3,16 +3,17 @@
 //! transient-mark deactivation, shift-selection).
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use ropey::Rope;
 
 use super::buffer::Buffer;
 use super::buffers::BufferSlot;
-use super::config::Settings;
 use super::picker::Picker;
 use super::search::Swiper;
 use super::commands::{self, flags, Command};
 use super::cursor::Cursor;
+use super::modes::{MinorMode, Modes};
 use super::text;
 
 /// The raw prefix argument, as typed.
@@ -91,8 +92,12 @@ pub struct Editor {
     last_was_kill: bool,
 
     pub message: Option<String>,
-    pub fill_column: usize,
-    pub tab_width: usize,
+    /// Global settings and keymap, and the major/minor mode definitions.
+    pub(crate) modes: Arc<Modes>,
+    /// A command chosen in M-x, for the view to run (it may need to read a key first).
+    pub pending_command: Option<(&'static str, Args)>,
+    /// Commands run from M-x, most recent first.
+    pub command_history: Vec<&'static str>,
     pub last_command: &'static str,
     pub this_command: &'static str,
     /// Text to publish to the system clipboard (set on kill/copy).
@@ -107,7 +112,11 @@ pub struct Editor {
 }
 
 impl Editor {
-    pub fn new(buf: Buffer) -> Self {
+    /// An editor showing `buf`, with the built-in configuration's modes
+    /// (`set_modes` installs the user's).
+    pub fn new(mut buf: Buffer) -> Self {
+        let modes = Modes::builtin();
+        buf.modes = modes.initial(&buf);
         Self {
             buf,
             cursors: vec![Cursor::new(1, 0)],
@@ -127,8 +136,9 @@ impl Editor {
             kill_happened: false,
             last_was_kill: false,
             message: None,
-            fill_column: 70,
-            tab_width: 4,
+            modes,
+            pending_command: None,
+            command_history: Vec::new(),
             last_command: "",
             this_command: "",
             clipboard_out: None,
@@ -138,12 +148,6 @@ impl Editor {
             recenter_step: 0,
             quit_requested: false,
         }
-    }
-
-    /// Apply settings from the configuration.
-    pub fn apply_settings(&mut self, s: &Settings) {
-        self.fill_column = s.fill_column;
-        self.tab_width = s.tab_width.max(1);
     }
 
     // ------------------------------------------------------------- accessors
@@ -333,10 +337,19 @@ impl Editor {
     // --------------------------------------------------------- run command
 
     pub fn execute(&mut self, name: &str, args: Args) {
-        match commands::lookup(name) {
+        if let Some(cmd) = commands::lookup(name) {
+            return self.run(cmd, args);
+        }
+        // Major mode commands come from the configuration.
+        let modes = self.modes.clone();
+        match modes.command(name) {
             Some(cmd) => self.run(cmd, args),
             None => self.message = Some(format!("Unknown command: {name}")),
         }
+    }
+
+    fn read_only_message(&self) -> String {
+        format!("Buffer is read-only: {}", self.buf.name)
     }
 
     pub fn run(&mut self, cmd: &Command, args: Args) {
@@ -348,6 +361,12 @@ impl Editor {
         self.kill_happened = false;
 
         let undoable = cmd.flags & flags::NO_UNDO == 0;
+        let read_only = self.minor_on(MinorMode::ReadOnly);
+        if read_only && matches!(cmd.name, "undo" | "undo-redo") {
+            self.message = Some(self.read_only_message());
+            self.last_command = cmd.name;
+            return;
+        }
         let self_insert = cmd.name == "self-insert-command";
         if self_insert && self.last_command != "self-insert-command" {
             self.buf.undo_boundary();
@@ -375,7 +394,14 @@ impl Editor {
             self.message = Some(e);
         }
 
-        let edited = undoable && self.buf.end_group(&self.cursors);
+        // read-only-mode: the command ran, but its changes are taken back
+        // (what it put on the kill ring stays, as in Emacs).
+        let refused = if undoable && read_only { self.buf.abort_group() } else { None };
+        if let Some(before) = refused {
+            self.cursors = before;
+            self.message = Some(self.read_only_message());
+        }
+        let edited = undoable && !read_only && self.buf.end_group(&self.cursors);
         if cmd.flags & flags::VERTICAL == 0 {
             for c in &mut self.cursors {
                 c.goal_col = None;

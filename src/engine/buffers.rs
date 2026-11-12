@@ -1,12 +1,13 @@
 //! Multiple buffers: the current one lives in `Editor.buf`/`cursors`; the
 //! others are parked in `Editor.others` in most-recently-used order, each with
-//! its own cursors. Also the switch-to-buffer picker's actions.
+//! its own cursors. Also the picker's actions, for switch-to-buffer and M-x.
 
 use super::buffer::Buffer;
+use super::commands::{self, COMMANDS};
 use super::cursor::Cursor;
-use super::editor::{Editor, Scroll};
-use super::keymap::{Key, Keymap};
-use super::picker::{Candidate, Picker};
+use super::editor::{Args, Editor, RawArg, Scroll};
+use super::keymap::{Key, Keymap, where_is};
+use super::picker::{Candidate, Picker, PickerKind};
 
 /// What the picker keymap can bind keys to.
 pub const PICKER_ACTIONS: &[&str] = &[
@@ -59,6 +60,7 @@ impl Editor {
     /// Add a buffer behind the current one (it becomes the "other" buffer). Returns its id.
     pub fn add_buffer(&mut self, mut buf: Buffer) -> u64 {
         buf.name = self.unique_name(&buf.name);
+        buf.modes = self.modes.initial(&buf);
         let id = self.next_buf_id;
         self.next_buf_id += 1;
         self.others.insert(0, BufferSlot { id, buf, cursors: vec![Cursor::new(1, 0)], primary: 1, next_cursor_id: 2 });
@@ -153,6 +155,7 @@ impl Editor {
     pub fn display_view(&self) -> BufView<'_> {
         self.picker
             .as_ref()
+            .filter(|p| p.kind == PickerKind::Buffers)
             .and_then(|p| p.selected_candidate())
             .and_then(|c| self.find_buffer(c.id))
             .unwrap_or_else(|| self.current_view())
@@ -195,12 +198,78 @@ impl Editor {
         self.picker = Some(Picker::new("Switch to buffer", self.buffer_candidates()));
     }
 
+    // ------------------------------------------------------------- M-x
+
+    /// Every command M-x offers: the ones used from M-x before (most recent
+    /// first), then the rest alphabetically.
+    fn command_names(&self) -> Vec<&'static str> {
+        let mut all: Vec<&'static str> = COMMANDS
+            .iter()
+            .map(|c| c.name)
+            .filter(|n| !matches!(*n, "self-insert-command" | "execute-extended-command"))
+            .chain(self.modes.major_names())
+            .collect();
+        all.sort_unstable();
+        let mut v: Vec<&'static str> = self.command_history.iter().copied().filter(|n| all.contains(n)).collect();
+        v.extend(all.into_iter().filter(|n| !self.command_history.contains(n)));
+        v
+    }
+
+    /// Open M-x: pick a command to run with `args` (the prefix argument typed before M-x).
+    pub fn open_command_picker(&mut self, args: Args) {
+        let names = self.command_names();
+        let maps = self.active_keymaps();
+        let candidates = names
+            .iter()
+            .enumerate()
+            .map(|(i, &name)| {
+                let doc = commands::lookup(name).or_else(|| self.modes.command(name)).map_or("", |c| c.doc);
+                Candidate {
+                    id: i as u64,
+                    label: name.to_string(),
+                    detail: doc.to_string(),
+                    annotation: where_is(&maps, name).unwrap_or_default(),
+                    modified: false,
+                    current: name == self.buf.modes.major,
+                }
+            })
+            .collect();
+        let prompt = match args.raw {
+            None => "M-x".to_string(),
+            Some(RawArg::Universal(k)) => format!("{} M-x", vec!["C-u"; k as usize].join(" ")),
+            Some(RawArg::Number(n)) => format!("C-u {n} M-x"),
+            Some(RawArg::Minus) => "C-u - M-x".to_string(),
+        };
+        self.picker = Some(Picker::new(&prompt, candidates).with_kind(PickerKind::Commands { names, args }));
+    }
+
+    /// Close M-x and hand `name` to the view to run.
+    fn run_from_picker(&mut self, name: &'static str) {
+        let Some(Picker { kind: PickerKind::Commands { args, .. }, .. }) = self.picker.take() else { return };
+        self.command_history.retain(|n| *n != name);
+        self.command_history.insert(0, name);
+        self.pending_command = Some((name, args));
+    }
+
+    /// The command named exactly like the picker's query, if any.
+    fn typed_command(p: &Picker) -> Option<&'static str> {
+        let PickerKind::Commands { names, .. } = &p.kind else { return None };
+        names.iter().copied().find(|n| *n == p.query.trim())
+    }
+
     /// Accept match `i` of the open picker (mouse click / RET).
     pub fn picker_accept(&mut self, i: usize) {
-        let Some(p) = self.picker.take() else { return };
-        if let Some(m) = p.matches.get(i) {
-            let id = p.candidates[m.index].id;
-            self.switch_to_buffer(id);
+        let Some(p) = self.picker.as_ref() else { return };
+        let Some(id) = p.matches.get(i).map(|m| p.candidates[m.index].id) else { return };
+        match &p.kind {
+            PickerKind::Buffers => {
+                self.picker = None;
+                self.switch_to_buffer(id);
+            }
+            PickerKind::Commands { names, .. } => {
+                let name = names[id as usize];
+                self.run_from_picker(name);
+            }
         }
     }
 
@@ -232,6 +301,23 @@ impl Editor {
             p.confirm_kill = None;
         }
         p.message = None;
+        if let PickerKind::Commands { .. } = p.kind {
+            match action {
+                "picker-accept" if p.selected_candidate().is_some() => {
+                    let i = p.selected;
+                    return self.picker_accept(i);
+                }
+                "picker-accept" | "picker-accept-input" => {
+                    match Self::typed_command(p) {
+                        Some(name) => self.run_from_picker(name),
+                        None => p.message = Some("No match".into()),
+                    }
+                    return;
+                }
+                "picker-kill-buffer" => return,
+                _ => {}
+            }
+        }
         match action {
             "picker-quit" => {
                 self.picker = None;

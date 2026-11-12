@@ -15,9 +15,9 @@ use gpui::{
     point, prelude::*, px, rgba, uniform_list,
 };
 
-use emax::engine::picker::Picker;
+use emax::engine::picker::{Picker, PickerKind};
 use emax::engine::{Swiper, SwiperExit};
-use emax::engine::{Appearance, BufView, Dispatcher, Editor, Key, Keymap, Keymaps, Outcome, Scroll, Theme, text};
+use emax::engine::{Appearance, Args, BufView, Dispatcher, Editor, Key, Keymap, Keymaps, Outcome, Scroll, Theme, text};
 
 // ------------------------------------------------------------------ layout
 
@@ -68,7 +68,7 @@ impl EmaxView {
         .detach();
         Self {
             ed,
-            keys: Dispatcher::new(keymaps.global),
+            keys: Dispatcher::new(),
             picker_keys: keymaps.picker,
             search_keys: keymaps.search,
             echo,
@@ -121,7 +121,7 @@ impl EmaxView {
 
         if self.ed.picker.is_some() {
             self.ed.picker_key(&self.picker_keys, &key);
-            self.after_picker();
+            self.after_picker(cx);
             cx.stop_propagation();
             cx.notify();
             return;
@@ -134,10 +134,21 @@ impl EmaxView {
             return;
         }
 
-        match self.keys.dispatch(&key) {
+        let outcome = self.keys.dispatch(&key, &self.ed.active_keymaps());
+        self.outcome(outcome, cx);
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn outcome(&mut self, outcome: Outcome, cx: &mut Context<Self>) {
+        match outcome {
             Outcome::Pending(echo) => self.echo = Some(echo.into()),
             Outcome::Undefined(seq) => self.echo = Some(format!("{seq} is undefined").into()),
-            Outcome::Run(cmd, args) => {
+            Outcome::Run(cmd, args) => self.run_command(cmd, args, cx),
+        }
+    }
+
+    fn run_command(&mut self, cmd: &'static str, args: Args, cx: &mut Context<Self>) {
                 if cmd == "yank" {
                     // interprogram-paste: pick up text copied in other apps.
                     if let Some(t) = cx.read_from_clipboard().and_then(|c| c.text()) {
@@ -157,20 +168,21 @@ impl EmaxView {
                     self.swiper_scroll = Some(self.scroll_for(self.ed.buf_id).0.borrow().base_handle.offset());
                 }
                 self.apply_scroll();
-            }
-        }
-        cx.stop_propagation();
-        cx.notify();
     }
 
-    /// After the picker handled a key (or a click): update echo and scrolling.
-    fn after_picker(&mut self) {
+    /// After the picker handled a key (or a click): update echo and scrolling,
+    /// and run the command M-x chose.
+    fn after_picker(&mut self, cx: &mut Context<Self>) {
         match &self.ed.picker {
             Some(p) => self.echo = p.message.clone().map(Into::into),
             None => {
                 self.echo = self.ed.message.take().map(Into::into);
                 self.apply_scroll();
             }
+        }
+        if let Some((cmd, args)) = self.ed.pending_command.take() {
+            let outcome = self.keys.invoke(cmd, args);
+            self.outcome(outcome, cx);
         }
     }
 
@@ -280,7 +292,7 @@ impl EmaxView {
                     .when(!selected, |d| d.hover(|s| s.bg(rgba(t.row_hover))))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.ed.picker_accept(i);
-                        this.after_picker();
+                        this.after_picker(cx);
                         cx.notify();
                     }))
                     .child(
@@ -326,7 +338,10 @@ impl EmaxView {
 
         let query: SharedString = p.query.clone().into();
         let empty = n == 0;
-        let footer_hint = if empty && !p.query.trim().is_empty() {
+        let commands = matches!(p.kind, PickerKind::Commands { .. });
+        let footer_hint = if commands {
+            hints(&self.picker_keys, &[("picker-accept", "run"), ("picker-next", "next"), ("picker-previous", "prev"), ("picker-quit", "cancel")])
+        } else if empty && !p.query.trim().is_empty() {
             hints(&self.picker_keys, &[("picker-accept", &format!("create buffer “{}”", p.query.trim())), ("picker-quit", "cancel")])
         } else {
             hints(
@@ -366,7 +381,7 @@ impl EmaxView {
                     .pt_3()
                     .text_size(self.ui(11.5))
                     .text_color(rgba(t.dim))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(p.prompt.to_uppercase()))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(if commands { p.prompt.clone() } else { p.prompt.to_uppercase() }))
                     .child(div().flex_1())
                     .child(format!("{n} / {}", p.candidates.len())),
             )
@@ -383,7 +398,7 @@ impl EmaxView {
                     .child(div().text_color(rgba(t.accent)).child("❯"))
                     .child(query_with_caret(&query, self.ui(18.0), t))
                     .when(query.is_empty(), |d| {
-                        d.child(div().text_color(rgba(t.dim)).child("Type to filter buffers…"))
+                        d.child(div().text_color(rgba(t.dim)).child(if commands { "Type to filter commands…" } else { "Type to filter buffers…" }))
                     }),
             )
             .child(
@@ -399,7 +414,11 @@ impl EmaxView {
                                 .px_3()
                                 .py_4()
                                 .text_color(rgba(t.dim))
-                                .child(if p.query.trim().is_empty() { "No buffers".to_string() } else { "No matching buffer".to_string() }),
+                                .child(match (commands, p.query.trim().is_empty()) {
+                                    (true, _) => "No matching command",
+                                    (false, true) => "No buffers",
+                                    (false, false) => "No matching buffer",
+                                }),
                         )
                     }),
             )
@@ -595,7 +614,7 @@ fn to_key(ks: &Keystroke) -> Key {
         "backspace" => "DEL".to_string(),
         "delete" => "<delete>".to_string(),
         "escape" => "ESC".to_string(),
-        "up" | "down" | "left" | "right" | "home" | "end" => format!("<{}>", ks.key),
+        "up" | "down" | "left" | "right" | "home" | "end" | "insert" => format!("<{}>", ks.key),
         "pageup" => "<prior>".to_string(),
         "pagedown" => "<next>".to_string(),
         k if k.len() > 1 && k.starts_with('f') && k[1..].parse::<u8>().is_ok() => format!("<{k}>"),
@@ -747,7 +766,7 @@ impl Render for EmaxView {
             self.last_latency_us = start.elapsed().as_micros();
         }
 
-        let (view_id, view_name, total, cur_line, cur_col, cursor_count, region_len, modified, previewing) = {
+        let (view_id, view_name, lighters, total, cur_line, cur_col, cursor_count, region_len, modified, previewing) = {
             let v = self.ed.display_view();
             let r = &v.buf.rope;
             let p = v.cursors.iter().find(|c| c.id == v.primary).map_or(0, |c| c.point).min(r.len_chars());
@@ -756,6 +775,7 @@ impl Render for EmaxView {
             (
                 v.id,
                 v.buf.name.clone(),
+                self.ed.mode_lighters(v.buf),
                 r.len_lines(),
                 line,
                 p - r.line_to_char(line),
@@ -805,7 +825,7 @@ impl Render for EmaxView {
                             )
                             .child({
                                 let hl = search.map(|s| s.highlights(ix)).unwrap_or_default();
-                                render_line(&v, ix, this.ed.tab_width, true, &hl, selected_match == Some(ix), t)
+                                render_line(&v, ix, this.ed.tab_width_of(v.buf), true, &hl, selected_match == Some(ix), t)
                             })
                     })
                     .collect();
@@ -825,6 +845,7 @@ impl Render for EmaxView {
             .text_color(rgba(t.foreground))
             .child(div().text_color(rgba(t.accent)).child(if modified { "●" } else { "○" }))
             .child(div().font_weight(FontWeight::BOLD).child(view_name))
+            .child(div().text_color(rgba(t.dim)).child(format!("({lighters})")))
             .when(previewing, |d| d.child(div().text_color(rgba(t.accent)).child("preview")))
             .child(format!("L{} C{}", cur_line + 1, cur_col))
             .when(cursor_count > 1, |d| {

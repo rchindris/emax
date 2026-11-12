@@ -3,6 +3,7 @@
 mod ui;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{App, Application, Bounds, Focusable, WindowBounds, WindowOptions, prelude::*, px, size};
@@ -27,6 +28,8 @@ const SCRATCH: &str = ";; This buffer is for text that is not saved.
 ;; Buffers    C-x b  switch (fuzzy, live preview; C-j create, C-k kill)
 ;;            C-x C-b  same   C-x <left>/<right> cycle   C-x k kill
 ;; Files      C-x C-s save   C-x C-c quit
+;; Commands   M-x  run any command by name (fuzzy), e.g. rust-mode, auto-fill-mode
+;; Modes      C-x C-q read-only   <insert> overwrite   M-x <mode> to switch or toggle
 ;;
 ;; Run `emax <file>...` to open files.
 
@@ -67,7 +70,7 @@ fn main() {
             ed.add_buffer(open(p));
         }
     }
-    ed.apply_settings(&config.settings);
+    ed.set_modes(Arc::new(config.modes));
     let lines: usize = ed.rope().len_lines();
     ed.message = Some(match config.warnings.as_slice() {
         [] => format!(

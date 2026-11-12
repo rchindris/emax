@@ -100,6 +100,55 @@
       "overlay": "#002b3626"
     }
   },
+  "modes": {
+    "default_major_mode": "fundamental-mode",
+    "initial_major_mode": "text-mode",
+    "major": {
+      "fundamental-mode": {
+        "lighter": "Fundamental"
+      },
+      "text-mode": {
+        "lighter": "Text",
+        "files": ["*.txt", "*.text", "README", "LICENSE", "COPYING"],
+        "minor_modes": ["auto-fill-mode"]
+      },
+      "markdown-mode": {
+        "lighter": "Markdown",
+        "parent": "text-mode",
+        "files": ["*.md", "*.markdown"]
+      },
+      "prog-mode": {
+        "lighter": "Prog",
+        "minor_modes": ["electric-pair-mode"]
+      },
+      "rust-mode": {
+        "lighter": "Rust",
+        "parent": "prog-mode",
+        "files": ["*.rs"],
+        "interpreters": ["rust-script"],
+        "editor": { "fill_column": 100, "tab_width": 4 }
+      },
+      "json-mode": {
+        "lighter": "JSON",
+        "parent": "prog-mode",
+        "files": ["*.json", "*.jsonc", ".prettierrc", ".eslintrc"],
+        "editor": { "tab_width": 2 }
+      },
+      "lisp-mode": {
+        "lighter": "Lisp",
+        "parent": "prog-mode",
+        "files": ["*.lisp", "*.lsp", "*.cl", "*.el", "*.scm", "*.ss", "*.rkt", "*.clj", "*.edn"],
+        "interpreters": ["sbcl", "clisp", "guile", "racket", "steel", "emacs"],
+        "editor": { "tab_width": 2 }
+      }
+    },
+    "minor": {
+      "auto-fill-mode": { "lighter": "Fill" },
+      "read-only-mode": { "lighter": "RO" },
+      "overwrite-mode": { "lighter": "Ovwrt" },
+      "electric-pair-mode": { "lighter": "" }
+    }
+  },
   "keymaps": {
     "global": {
       "C-f": "forward-char",
@@ -241,6 +290,9 @@
       "C-x C-c": "save-buffers-kill-terminal",
       "s-q": "save-buffers-kill-terminal",
       "M-x": "execute-extended-command",
+
+      "C-x C-q": "read-only-mode",
+      "<insert>": "overwrite-mode",
 
       "C-u": "universal-argument",
       "M--": "negative-argument",

@@ -118,12 +118,47 @@ impl Keymap {
         self.map.get(seq).copied()
     }
 
+    pub fn is_prefix(&self, seq: &[String]) -> bool {
+        self.prefixes.contains(seq)
+    }
+
     /// All key sequences bound to `command`, for help/discoverability.
     pub fn keys_for(&self, command: &str) -> Vec<String> {
         let mut v: Vec<String> = self.map.iter().filter(|(_, c)| **c == command).map(|(k, _)| k.join(" ")).collect();
         v.sort_by_key(|k| (k.len(), k.clone()));
         v
     }
+}
+
+/// What a key sequence means in a stack of keymaps (highest priority first):
+/// the first keymap that binds the sequence, or a longer one starting with
+/// it, decides.
+#[derive(Debug, PartialEq)]
+pub enum Binding {
+    Command(&'static str),
+    Prefix,
+    Unbound,
+}
+
+pub fn lookup_in(maps: &[&Keymap], seq: &[String]) -> Binding {
+    for m in maps {
+        if let Some(c) = m.lookup(seq) {
+            return Binding::Command(c);
+        }
+        if m.is_prefix(seq) {
+            return Binding::Prefix;
+        }
+    }
+    Binding::Unbound
+}
+
+/// The first key sequence that runs `command` in a stack of keymaps (one
+/// shadowed by a higher keymap doesn't count).
+pub fn where_is(maps: &[&Keymap], command: &str) -> Option<String> {
+    maps.iter().flat_map(|m| m.keys_for(command)).find(|keys| {
+        let seq: Vec<String> = keys.split(' ').map(String::from).collect();
+        matches!(lookup_in(maps, &seq), Binding::Command(c) if c == command)
+    })
 }
 
 /// Commands the dispatcher handles itself (prefix arguments); they can be
@@ -145,16 +180,28 @@ enum ArgState {
     Digits { neg: bool, value: Option<i64> },
 }
 
+/// Turns keys into commands. The keymaps are passed in with each key, since
+/// they depend on the current buffer's modes.
+#[derive(Default)]
 pub struct Dispatcher {
-    pub keymap: Keymap,
     pending: Vec<String>,
     arg: Option<ArgState>,
     read_char: Option<(&'static str, Args)>,
 }
 
 impl Dispatcher {
-    pub fn new(keymap: Keymap) -> Self {
-        Self { keymap, pending: Vec::new(), arg: None, read_char: None }
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Run a command chosen by name (M-x): if it reads a character, wait for it.
+    pub fn invoke(&mut self, cmd: &'static str, args: Args) -> Outcome {
+        self.reset();
+        if commands::lookup(cmd).is_some_and(|c| c.flags & flags::READ_CHAR != 0) {
+            self.read_char = Some((cmd, args));
+            return Outcome::Pending(format!("{cmd}: "));
+        }
+        Outcome::Run(cmd, args)
     }
 
     fn take_args(&mut self) -> Args {
@@ -199,11 +246,12 @@ impl Dispatcher {
         self.read_char = None;
     }
 
-    pub fn dispatch(&mut self, key: &Key) -> Outcome {
+    /// Handle a key, looking it up in `maps` (highest priority first).
+    pub fn dispatch(&mut self, key: &Key, maps: &[&Keymap]) -> Outcome {
         let k = key.canonical();
 
         if let Some((cmd, mut args)) = self.read_char.take() {
-            if self.keymap.lookup(std::slice::from_ref(&k)) == Some("keyboard-quit") {
+            if lookup_in(maps, std::slice::from_ref(&k)) == Binding::Command("keyboard-quit") {
                 return Outcome::Run("keyboard-quit", Args::default());
             }
             return match key.as_char() {
@@ -235,17 +283,19 @@ impl Dispatcher {
         }
 
         self.pending.push(k.clone());
-        let mut found = self.keymap.lookup(&self.pending).map(|c| (c, false));
-
-        if found.is_none() && self.keymap.prefixes.contains(&self.pending) {
-            return Outcome::Pending(self.echo());
-        }
+        let mut found = match lookup_in(maps, &self.pending) {
+            Binding::Command(c) => Some((c, false)),
+            Binding::Prefix => return Outcome::Pending(self.echo()),
+            Binding::Unbound => None,
+        };
         // Shift-translation: S-<right> runs <right>'s command with shift selection.
         if found.is_none() {
             if let Some(unshifted) = key.unshifted() {
                 let mut seq = self.pending.clone();
                 *seq.last_mut().unwrap() = unshifted;
-                found = self.keymap.lookup(&seq).map(|c| (c, true));
+                if let Binding::Command(c) = lookup_in(maps, &seq) {
+                    found = Some((c, true));
+                }
             }
         }
         let seq = std::mem::take(&mut self.pending);
@@ -306,20 +356,27 @@ mod tests {
         Key::parse(s)
     }
 
-    fn run(d: &mut Dispatcher, keys: &str) -> Outcome {
+    fn global() -> Keymap {
+        super::super::config::Config::builtin().modes.global
+    }
+
+    fn run_in(d: &mut Dispatcher, maps: &[&Keymap], keys: &str) -> Outcome {
         let mut last = Outcome::Pending(String::new());
         for k in keys.split_whitespace() {
-            last = d.dispatch(&key(k));
+            last = d.dispatch(&key(k), maps);
         }
         last
     }
 
     #[test]
     fn sequences_and_args() {
-        let mut d = Dispatcher::new(super::super::config::Keymaps::builtin().global);
+        let g = global();
+        let maps = [&g];
+        let mut d = Dispatcher::new();
+        let run = |d: &mut Dispatcher, keys: &str| run_in(d, &maps, keys);
         assert!(matches!(run(&mut d, "C-x C-s"), Outcome::Run("save-buffer", _)));
-        assert!(matches!(d.dispatch(&key("C-x")), Outcome::Pending(ref s) if s == "C-x-"));
-        assert!(matches!(d.dispatch(&key("C-z")), Outcome::Undefined(ref s) if s == "C-x C-z"));
+        assert!(matches!(run(&mut d, "C-x"), Outcome::Pending(ref s) if s == "C-x-"));
+        assert!(matches!(run(&mut d, "C-z"), Outcome::Undefined(ref s) if s == "C-x C-z"));
 
         let Outcome::Run(c, a) = run(&mut d, "C-u C-u C-f") else { panic!() };
         assert_eq!((c, a.n()), ("forward-char", 16));
@@ -335,7 +392,10 @@ mod tests {
 
     #[test]
     fn shift_translation_and_read_char() {
-        let mut d = Dispatcher::new(super::super::config::Keymaps::builtin().global);
+        let g = global();
+        let maps = [&g];
+        let mut d = Dispatcher::new();
+        let run = |d: &mut Dispatcher, keys: &str| run_in(d, &maps, keys);
         let Outcome::Run(c, a) = run(&mut d, "S-<right>") else { panic!() };
         assert_eq!((c, a.shift), ("forward-char", true));
         let Outcome::Run(c, a) = run(&mut d, "S-a") else { panic!() };
@@ -343,5 +403,24 @@ mod tests {
         assert!(matches!(run(&mut d, "M-z"), Outcome::Pending(_)));
         let Outcome::Run(c, a) = run(&mut d, "e") else { panic!() };
         assert_eq!((c, a.text.as_deref()), ("zap-to-char", Some("e")));
+    }
+
+    #[test]
+    fn layers_shadow_and_share_prefixes() {
+        let g = global();
+        let mut mode = Keymap::new();
+        mode.bind("C-c C-c", "fill-paragraph");
+        mode.bind("C-f", "forward-word");
+        let maps = [&mode, &g];
+        let mut d = Dispatcher::new();
+        assert!(matches!(run_in(&mut d, &maps, "C-f"), Outcome::Run("forward-word", _)));
+        assert!(matches!(run_in(&mut d, &maps, "C-c C-c"), Outcome::Run("fill-paragraph", _)));
+        // A prefix the mode map uses still reaches the global bindings under it.
+        assert!(matches!(run_in(&mut d, &maps, "C-c C-<"), Outcome::Run("mc/mark-all-like-this", _)));
+        assert!(matches!(run_in(&mut d, &maps, "C-b"), Outcome::Run("backward-char", _)));
+        assert_eq!(where_is(&maps, "forward-char").as_deref(), Some("<right>"));
+        assert_eq!(where_is(&maps, "forward-word").as_deref(), Some("C-f"));
+        assert!(matches!(d.invoke("zap-to-char", Args::default()), Outcome::Pending(_)));
+        assert!(matches!(run_in(&mut d, &maps, "x"), Outcome::Run("zap-to-char", ref a) if a.text.as_deref() == Some("x")));
     }
 }

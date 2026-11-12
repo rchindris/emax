@@ -18,20 +18,25 @@
 //! }
 //! ```
 //!
+//! `modes` defines major modes and configures minor modes (see
+//! [`super::modes`]). A user entry for an existing mode is merged into it
+//! field by field; its keymap is merged like the keymaps above.
+//!
 //! `font`, `theme` and `themes` set the look (see [`super::theme`]); a user
 //! theme entry is merged color by color into the theme of the same name.
 //!
 //! Problems (bad JSON, unknown commands, malformed keys) never stop the
 //! editor: the offending entry is skipped and reported in `warnings`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use serde::Deserialize;
 
 use super::buffers::PICKER_ACTIONS;
-use super::commands;
+use super::commands::{self, flags, Command};
 use super::keymap::{Key, Keymap, PREFIX_ARG_COMMANDS};
+use super::modes::{self, FUNDAMENTAL, LocalSettings, MajorMode, MinorMode, MinorModeDef, Modes, intern};
 use super::search::SEARCH_ACTIONS;
 use super::theme::{self, DEFAULT_THEME, Fonts, RawThemes, Theme, Themes};
 
@@ -50,7 +55,59 @@ struct RawConfig {
     /// theme name -> color name (or `inherits`) -> value.
     themes: RawThemes,
     /// keymap name -> key sequence -> command (`null` unbinds).
-    keymaps: BTreeMap<String, BTreeMap<String, Option<String>>>,
+    keymaps: BTreeMap<String, RawKeymap>,
+    modes: RawModes,
+}
+
+type RawKeymap = BTreeMap<String, Option<String>>;
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct RawModes {
+    default_major_mode: Option<String>,
+    initial_major_mode: Option<String>,
+    major: BTreeMap<String, RawMajor>,
+    minor: BTreeMap<String, RawMinor>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct RawMajor {
+    lighter: Option<String>,
+    /// `""` removes an inherited parent.
+    parent: Option<String>,
+    files: Option<Vec<String>>,
+    interpreters: Option<Vec<String>>,
+    editor: RawEditor,
+    minor_modes: Option<Vec<String>>,
+    keymap: RawKeymap,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct RawMinor {
+    lighter: Option<String>,
+    keymap: RawKeymap,
+}
+
+/// A major mode merged from all layers, not yet checked.
+#[derive(Default)]
+struct MajorAcc {
+    lighter: Option<String>,
+    parent: Option<String>,
+    files: Vec<String>,
+    interpreters: Vec<String>,
+    settings: LocalSettings,
+    minor_modes: Vec<String>,
+    keymap: BTreeMap<String, String>,
+}
+
+#[derive(Default)]
+struct ModesAcc {
+    default_major: Option<String>,
+    initial_major: Option<String>,
+    major: BTreeMap<String, MajorAcc>,
+    minor: BTreeMap<String, (Option<String>, BTreeMap<String, String>)>,
 }
 
 #[derive(Deserialize, Default)]
@@ -88,9 +145,9 @@ impl Default for Settings {
     }
 }
 
+/// The keymaps of the panels. The global keymap and the modes' keymaps are
+/// in [`Modes`].
 pub struct Keymaps {
-    /// Editing keys (multi-key sequences like `C-x C-s` allowed).
-    pub global: Keymap,
     /// Keys while the buffer picker (C-x b) is open; single keys only.
     pub picker: Keymap,
     /// Keys while the search panel (C-s) is open; single keys only.
@@ -112,7 +169,8 @@ pub struct Appearance {
 }
 
 pub struct Config {
-    pub settings: Settings,
+    /// Global settings and keymap, major and minor modes.
+    pub modes: Modes,
     pub appearance: Appearance,
     pub keymaps: Keymaps,
     /// The user file that was loaded, if any.
@@ -156,6 +214,7 @@ impl Config {
         let mut raw_themes = RawThemes::new();
         let mut maps: BTreeMap<&'static str, BTreeMap<String, String>> =
             KEYMAP_NAMES.iter().map(|n| (*n, BTreeMap::new())).collect();
+        let mut modes_acc = ModesAcc::default();
 
         for (label, text) in layers {
             let raw: RawConfig = match serde_json::from_str(text) {
@@ -204,41 +263,16 @@ impl Config {
                     warnings.push(format!("{label}: unknown keymap \"{name}\" (expected one of {})", KEYMAP_NAMES.join(", ")));
                     continue;
                 };
-                for (keys, command) in entries {
-                    let keys = match normalize_keys(&keys) {
-                        Ok(k) => k,
-                        Err(e) => {
-                            warnings.push(format!("{label}: keymaps.{name}: {e}"));
-                            continue;
-                        }
-                    };
-                    match command {
-                        Some(c) => map.insert(keys, c),
-                        None => map.remove(&keys),
-                    };
-                }
+                merge_keymap(map, entries, &format!("{label}: keymaps.{name}"), &mut warnings);
             }
+            merge_modes(&mut modes_acc, raw.modes, label, &mut warnings);
         }
 
-        let mut build = |name: &str, resolve: &dyn Fn(&str) -> Option<&'static str>, single_key: bool| {
-            let mut km = Keymap::new();
-            for (keys, command) in &maps[name] {
-                if single_key && keys.contains(' ') {
-                    warnings.push(format!("keymaps.{name}: \"{keys}\": only single keys can be bound here"));
-                    continue;
-                }
-                match resolve(command) {
-                    Some(c) => km.bind(keys, c),
-                    None => warnings.push(format!("keymaps.{name}: \"{keys}\": unknown command \"{command}\"")),
-                }
-            }
-            km
-        };
         let keymaps = Keymaps {
-            global: build("global", &resolve_global, false),
-            picker: build("picker", &|a| PICKER_ACTIONS.iter().find(|x| **x == a).copied(), true),
-            search: build("search", &|a| SEARCH_ACTIONS.iter().find(|x| **x == a).copied(), true),
+            picker: build_keymap("keymaps.picker", &maps["picker"], &|a| PICKER_ACTIONS.iter().find(|x| **x == a).copied(), true, &mut warnings),
+            search: build_keymap("keymaps.search", &maps["search"], &|a| SEARCH_ACTIONS.iter().find(|x| **x == a).copied(), true, &mut warnings),
         };
+        let modes = build_modes(modes_acc, settings, &maps["global"], &mut warnings);
         let fallback = builtin_default_theme();
         let mut pick = |name: &str| {
             theme::resolve(name, &raw_themes, &fallback, &mut warnings).unwrap_or_else(|| {
@@ -257,7 +291,7 @@ impl Config {
             RawThemeChoice::ByAppearance { light, dark } => Themes { light: pick(&light), dark: pick(&dark) },
         };
         let appearance = Appearance { fonts: Fonts::new(&family, &ui_family, size, line_height), themes };
-        Self { settings, appearance, keymaps, user_file: None, warnings }
+        Self { modes, appearance, keymaps, user_file: None, warnings }
     }
 }
 
@@ -272,6 +306,206 @@ fn resolve_global(name: &str) -> Option<&'static str> {
     commands::lookup(name)
         .map(|c| c.name)
         .or_else(|| PREFIX_ARG_COMMANDS.iter().find(|c| **c == name).copied())
+}
+
+/// Add a layer's entries to a keymap being merged (`null` unbinds).
+fn merge_keymap(map: &mut BTreeMap<String, String>, entries: RawKeymap, ctx: &str, warnings: &mut Vec<String>) {
+    for (keys, command) in entries {
+        let keys = match normalize_keys(&keys) {
+            Ok(k) => k,
+            Err(e) => {
+                warnings.push(format!("{ctx}: {e}"));
+                continue;
+            }
+        };
+        match command {
+            Some(c) => map.insert(keys, c),
+            None => map.remove(&keys),
+        };
+    }
+}
+
+fn build_keymap(
+    ctx: &str,
+    entries: &BTreeMap<String, String>,
+    resolve: &dyn Fn(&str) -> Option<&'static str>,
+    single_key: bool,
+    warnings: &mut Vec<String>,
+) -> Keymap {
+    let mut km = Keymap::new();
+    for (keys, command) in entries {
+        if single_key && keys.contains(' ') {
+            warnings.push(format!("{ctx}: \"{keys}\": only single keys can be bound here"));
+            continue;
+        }
+        match resolve(command) {
+            Some(c) => km.bind(keys, c),
+            None => warnings.push(format!("{ctx}: \"{keys}\": unknown command \"{command}\"")),
+        }
+    }
+    km
+}
+
+fn check_tab_width(v: Option<usize>, ctx: &str, warnings: &mut Vec<String>) -> Option<usize> {
+    if v == Some(0) {
+        warnings.push(format!("{ctx}: tab_width must be at least 1"));
+        return None;
+    }
+    v
+}
+
+/// Merge one layer's `modes` section into what earlier layers defined.
+fn merge_modes(acc: &mut ModesAcc, raw: RawModes, label: &str, warnings: &mut Vec<String>) {
+    if raw.default_major_mode.is_some() {
+        acc.default_major = raw.default_major_mode;
+    }
+    if raw.initial_major_mode.is_some() {
+        acc.initial_major = raw.initial_major_mode;
+    }
+    for (name, m) in raw.major {
+        let ctx = format!("{label}: modes.major.{name}");
+        let a = acc.major.entry(name).or_default();
+        if m.lighter.is_some() {
+            a.lighter = m.lighter;
+        }
+        if let Some(p) = m.parent {
+            a.parent = (!p.is_empty()).then_some(p);
+        }
+        if let Some(f) = m.files {
+            a.files = f;
+        }
+        if let Some(i) = m.interpreters {
+            a.interpreters = i;
+        }
+        if m.editor.fill_column.is_some() {
+            a.settings.fill_column = m.editor.fill_column;
+        }
+        if let Some(t) = check_tab_width(m.editor.tab_width, &format!("{ctx}.editor"), warnings) {
+            a.settings.tab_width = Some(t);
+        }
+        if let Some(mm) = m.minor_modes {
+            a.minor_modes = mm;
+        }
+        merge_keymap(&mut a.keymap, m.keymap, &format!("{ctx}.keymap"), warnings);
+    }
+    for (name, m) in raw.minor {
+        if MinorMode::from_name(&name).is_none() {
+            let known: Vec<&str> = MinorMode::ALL.iter().map(|m| m.name()).collect();
+            warnings.push(format!("{label}: modes.minor: unknown minor mode \"{name}\" (known: {})", known.join(", ")));
+            continue;
+        }
+        let a = acc.minor.entry(name.clone()).or_default();
+        if m.lighter.is_some() {
+            a.0 = m.lighter;
+        }
+        merge_keymap(&mut a.1, m.keymap, &format!("{label}: modes.minor.{name}.keymap"), warnings);
+    }
+}
+
+/// Check the merged modes and build them, together with the global keymap
+/// (which can bind major mode commands).
+fn build_modes(mut acc: ModesAcc, settings: Settings, global: &BTreeMap<String, String>, warnings: &mut Vec<String>) -> Modes {
+    acc.major.entry(FUNDAMENTAL.to_string()).or_default();
+    acc.major.retain(|name, _| {
+        let problem = if !name.ends_with("-mode") {
+            Some("a major mode's name must end in \"-mode\"")
+        } else if commands::lookup(name).is_some() || MinorMode::from_name(name).is_some() {
+            Some("the name is already a command")
+        } else {
+            None
+        };
+        if let Some(p) = problem {
+            warnings.push(format!("modes.major.{name}: {p} (mode skipped)"));
+        }
+        problem.is_none()
+    });
+    let names: HashMap<String, &'static str> = acc.major.keys().map(|n| (n.clone(), intern(n))).collect();
+    let resolve = |c: &str| resolve_global(c).or_else(|| names.get(c).copied());
+
+    let mut major: HashMap<&'static str, MajorMode> = HashMap::new();
+    for (name, a) in acc.major {
+        let ctx = format!("modes.major.{name}");
+        let parent = a.parent.and_then(|p| match names.get(&p) {
+            Some(n) if *n == name => {
+                warnings.push(format!("{ctx}: a mode can't be its own parent"));
+                None
+            }
+            Some(n) => Some(*n),
+            None => {
+                warnings.push(format!("{ctx}: unknown parent mode \"{p}\""));
+                None
+            }
+        });
+        let minor_modes = a
+            .minor_modes
+            .iter()
+            .filter_map(|m| {
+                let found = MinorMode::from_name(m);
+                if found.is_none() {
+                    warnings.push(format!("{ctx}.minor_modes: unknown minor mode \"{m}\""));
+                }
+                found
+            })
+            .collect();
+        let name = names[&name];
+        let lighter = a.lighter.unwrap_or_else(|| {
+            let base = name.trim_end_matches("-mode");
+            let mut c = base.chars();
+            c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+        });
+        let command = Command {
+            name,
+            run: modes::major_mode_command,
+            flags: flags::NO_UNDO,
+            doc: intern(&format!("Major mode: switch this buffer to {lighter} mode.")),
+        };
+        let keymap = build_keymap(&format!("{ctx}.keymap"), &a.keymap, &resolve, false, warnings);
+        major.insert(
+            name,
+            MajorMode { name, lighter, parent, files: a.files, interpreters: a.interpreters, settings: a.settings, keymap, minor_modes, command },
+        );
+    }
+    // Break parent cycles at the link that closes them.
+    let mut sorted: Vec<&'static str> = major.keys().copied().collect();
+    sorted.sort_unstable();
+    for start in sorted {
+        let mut seen = vec![start];
+        let mut cur = start;
+        while let Some(p) = major[cur].parent {
+            if seen.contains(&p) {
+                warnings.push(format!("modes.major.{cur}: parent \"{p}\" makes a cycle (parent ignored)"));
+                major.get_mut(cur).unwrap().parent = None;
+                break;
+            }
+            seen.push(p);
+            cur = p;
+        }
+    }
+
+    let minor = MinorMode::ALL
+        .iter()
+        .map(|m| {
+            let (lighter, keymap) = acc.minor.remove(m.name()).unwrap_or_default();
+            MinorModeDef {
+                lighter: lighter.unwrap_or_else(|| m.default_lighter().to_string()),
+                keymap: build_keymap(&format!("modes.minor.{}.keymap", m.name()), &keymap, &resolve, false, warnings),
+            }
+        })
+        .collect();
+
+    let mut pick = |field: &str, v: Option<String>| -> &'static str {
+        match v {
+            None => FUNDAMENTAL,
+            Some(n) => names.get(&n).copied().unwrap_or_else(|| {
+                warnings.push(format!("modes.{field}: unknown major mode \"{n}\""));
+                FUNDAMENTAL
+            }),
+        }
+    };
+    let default_major = pick("default_major_mode", acc.default_major);
+    let initial_major = pick("initial_major_mode", acc.initial_major);
+    let global = build_keymap("keymaps.global", global, &resolve, false, warnings);
+    Modes { settings, global, major, minor, default_major: intern(default_major), initial_major: intern(initial_major) }
 }
 
 /// Check a key sequence and write it in canonical form (`M-C-x` -> `C-M-x`).
@@ -317,8 +551,8 @@ mod tests {
     fn builtin_config_is_clean() {
         let c = Config::builtin();
         assert!(c.warnings.is_empty(), "{:#?}", c.warnings);
-        assert_eq!(c.settings, Settings { fill_column: 70, tab_width: 4 });
-        assert_eq!(c.keymaps.global.lookup(&["C-x".into(), "C-s".into()]), Some("save-buffer"));
+        assert_eq!(c.modes.settings, Settings { fill_column: 70, tab_width: 4 });
+        assert_eq!(c.modes.global.lookup(&["C-x".into(), "C-s".into()]), Some("save-buffer"));
         assert_eq!(c.keymaps.picker.lookup(&["RET".into()]), Some("picker-accept"));
         assert_eq!(c.keymaps.search.lookup(&["C-s".into()]), Some("search-next-or-history"));
     }
@@ -345,8 +579,8 @@ mod tests {
         }"#;
         let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", user)]);
         assert!(c.warnings.is_empty(), "{:#?}", c.warnings);
-        assert_eq!(c.settings, Settings { fill_column: 80, tab_width: 4 });
-        let g = &c.keymaps.global;
+        assert_eq!(c.modes.settings, Settings { fill_column: 80, tab_width: 4 });
+        let g = &c.modes.global;
         assert_eq!(g.lookup(&["C-z".into()]), Some("undo"));
         assert_eq!(g.lookup(&["C-x".into(), "C-c".into()]), None);
         assert_eq!(g.lookup(&["C-M-f".into()]), Some("forward-word")); // normalized from M-C-f
@@ -369,11 +603,11 @@ mod tests {
         assert!(w.contains("\"Ctrl-x\" is not a key"), "{w}");
         assert!(w.contains("only single keys"), "{w}");
         assert!(w.contains("unknown keymap \"minibuffer\""), "{w}");
-        assert_eq!(c.keymaps.global.lookup(&["C-t".into()]), Some("undo")); // valid entries still apply
+        assert_eq!(c.modes.global.lookup(&["C-t".into()]), Some("undo")); // valid entries still apply
 
         let broken = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", "{ not json")]);
         assert!(broken.warnings[0].starts_with("user:"));
-        assert_eq!(broken.keymaps.global.lookup(&["C-f".into()]), Some("forward-char"));
+        assert_eq!(broken.modes.global.lookup(&["C-f".into()]), Some("forward-char"));
     }
 
     #[test]
