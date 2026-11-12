@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use ropey::Rope;
 
@@ -127,8 +127,11 @@ pub struct Editor {
     pub terminals: HashMap<BufferId, TermState>,
     /// Runs terminal processes; created on first use (see `pty_backend`).
     pub(crate) pty: Option<Box<dyn PtyBackend>>,
-    /// Given to the PTY backend: wakes the UI when output arrives.
+    /// Given to the PTY backend: wakes the UI when output arrives. It calls
+    /// whatever `set_waker` installed last, so a backend created before the
+    /// UI exists (e.g. to reattach a restored session) still wakes it.
     pub(crate) waker: Waker,
+    waker_target: Arc<RwLock<Waker>>,
     pub terminal_config: Arc<TerminalConfig>,
     pub session_config: SessionConfig,
 }
@@ -141,6 +144,12 @@ impl Editor {
         buf.modes = modes.initial(&buf);
         let mut hooks = Hooks::new();
         hooks.push(Event::BufferCreated { buf: 1 });
+        let waker_target = Arc::new(RwLock::new(noop_waker()));
+        let target = waker_target.clone();
+        let waker: Waker = Arc::new(move || {
+            let w = target.read().unwrap_or_else(|e| e.into_inner()).clone();
+            w()
+        });
         Self {
             buf,
             cursors: vec![Cursor::new(1, 0)],
@@ -175,7 +184,8 @@ impl Editor {
             layout: Layout::new(1),
             terminals: HashMap::new(),
             pty: None,
-            waker: noop_waker(),
+            waker,
+            waker_target,
             terminal_config: TerminalConfig::builtin(),
             session_config: SessionConfig::default(),
         }
@@ -183,10 +193,10 @@ impl Editor {
 
     // ------------------------------------------------------- integration
 
-    /// The UI's wake-up function: backends created from now on call it when
-    /// terminal output arrives.
+    /// The UI's wake-up function: backends call it when terminal output
+    /// arrives (including backends created before it was set).
     pub fn set_waker(&mut self, waker: Waker) {
-        self.waker = waker;
+        *self.waker_target.write().unwrap_or_else(|e| e.into_inner()) = waker;
     }
 
     /// Use `backend` for terminal processes (tests use `pty::mock`).

@@ -687,7 +687,12 @@ fn daemonize(log: &Path) -> io::Result<()> {
     unsafe { libc::setsid() };
     let _ = std::env::set_current_dir(std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| "/".into()));
     let null = File::open("/dev/null")?;
-    let out = OpenOptions::new().create(true).append(true).mode(0o600).open(log).or_else(|_| OpenOptions::new().write(true).open("/dev/null"))?;
+    let out = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(log)
+        .or_else(|_| OpenOptions::new().write(true).open("/dev/null"))?;
     // SAFETY: dup2 onto the standard descriptors with valid open files.
     unsafe {
         libc::dup2(null.as_raw_fd(), 0);

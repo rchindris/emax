@@ -824,6 +824,25 @@ mod tests {
         assert_eq!(ed.buffer_count(), 1);
     }
 
+    /// `main` restores (and so may create the backend) before the view
+    /// installs its waker; the backend must still wake the view.
+    #[test]
+    fn a_backend_made_before_the_waker_is_set_still_wakes_the_ui() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let mut ed = Editor::new(Buffer::from_str("*scratch*", ""));
+        let (mock, h) = MockBackend::with_waker(ed.waker.clone());
+        ed.set_pty_backend(Box::new(mock));
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let w = wakes.clone();
+        ed.set_waker(Arc::new(move || {
+            w.fetch_add(1, Ordering::SeqCst);
+        }));
+        let id = ed.pty_backend().unwrap().spawn(SpawnSpec::default()).unwrap();
+        h.output(id, b"x");
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn the_session_is_saved_on_quit_by_a_named_hook() {
         let dir = temp_dir("quit");
