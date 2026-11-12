@@ -7,6 +7,11 @@ use super::*;
 use crate::engine::pty::sys::pid_exists;
 use crate::engine::testutil::{TIMEOUT, temp_dir, wait_until};
 
+/// For waits on megabytes of output going through a pty: a few seconds on
+/// a laptop, several times that on a shared CI runner. These waits are about
+/// throughput, not about catching a hang, so they get much longer.
+const THROUGHPUT_TIMEOUT: Duration = Duration::from_secs(60);
+
 fn spec(program: &str, args: &[&str]) -> SpawnSpec {
     SpawnSpec { program: program.into(), args: args.iter().map(|a| a.to_string()).collect(), ..Default::default() }
 }
@@ -162,7 +167,7 @@ fn large_output_is_complete_and_coalesced() {
     let id = b.spawn(sh("head -c 6000000 /dev/zero | base64")).unwrap();
     let mut seen = Seen::default();
     let start = Instant::now();
-    wait_until("8 MB of output", TIMEOUT, || {
+    wait_until("8 MB of output", THROUGHPUT_TIMEOUT, || {
         seen.drain(&mut b);
         seen.exited(id).is_some()
     });
@@ -180,15 +185,16 @@ fn large_output_is_complete_and_coalesced() {
 #[test]
 fn backpressure_blocks_the_child_and_loses_nothing() {
     let mut b = backend();
-    // More than the channel can hold (EVENT_QUEUE chunks of READ_CHUNK).
-    let total = EVENT_QUEUE * READ_CHUNK + 8_000_000;
+    // More than the channel can hold (EVENT_QUEUE chunks of READ_CHUNK),
+    // plus far more than the kernel's pty buffer, so the child must block.
+    let total = EVENT_QUEUE * READ_CHUNK + 1_000_000;
     let id = b.spawn(sh(&format!("head -c {total} /dev/zero | tr '\\0' z"))).unwrap();
-    wait_until("the event queue to fill", TIMEOUT, || b.queued() >= EVENT_QUEUE);
+    wait_until("the event queue to fill", THROUGHPUT_TIMEOUT, || b.queued() >= EVENT_QUEUE);
     // The reader is stuck on the full queue, so the child can't finish.
     assert!(b.list().unwrap()[0].exited.is_none());
     assert!(b.bytes_read(id).unwrap() < total);
     let mut seen = Seen::default();
-    wait_until("all output", TIMEOUT, || {
+    wait_until("all output", THROUGHPUT_TIMEOUT, || {
         seen.drain(&mut b);
         seen.exited(id).is_some()
     });
@@ -449,11 +455,11 @@ fn waker_is_called_once_per_batch() {
     }));
     let id = b.spawn(sh(&format!("head -c {} /dev/zero", EVENT_QUEUE * READ_CHUNK + 4_000_000))).unwrap();
     // Many events pile up without draining: still a single wake-up.
-    wait_until("many events queued", TIMEOUT, || b.queued() >= EVENT_QUEUE);
+    wait_until("many events queued", THROUGHPUT_TIMEOUT, || b.queued() >= EVENT_QUEUE);
     assert_eq!(wakes.load(Ordering::SeqCst), 1);
     // Draining to empty re-arms the waker; more output wakes again.
     let mut seen = Seen::default();
-    wait_until("exit", TIMEOUT, || {
+    wait_until("exit", THROUGHPUT_TIMEOUT, || {
         seen.drain(&mut b);
         seen.exited(id).is_some()
     });
