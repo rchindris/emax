@@ -529,7 +529,7 @@
       "M-RET": "picker-accept-input",
       "C-n": "picker-next",
       "<down>": "picker-next",
-      "TAB": "picker-next",
+      "TAB": "picker-complete",
       "C-p": "picker-previous",
       "<up>": "picker-previous",
       "S-TAB": "picker-previous",

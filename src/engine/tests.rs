@@ -885,6 +885,53 @@ fn find_file_creates_new_files() {
 }
 
 #[test]
+fn tab_completes_the_selected_candidate() {
+    let (mut x, d) = file_tree();
+    x.keys("C-x C-f").typ("sr").keys("TAB");
+    // A directory is entered...
+    assert_eq!(x.ed.picker.as_ref().unwrap().query, format!("{}/src/", d.display()));
+    assert_eq!(file_picker_labels(&x), ["main.rs"]);
+    // ...a file is only completed: RET then opens it.
+    x.keys("TAB");
+    assert_eq!(x.ed.picker.as_ref().unwrap().query, format!("{}/src/main.rs", d.display()));
+    x.keys("RET");
+    assert!(x.ed.picker.is_none());
+    assert_eq!(x.ed.buf.name, "main.rs");
+    // In other pickers TAB puts the candidate in the query.
+    x.keys("M-x").typ("forwrdchar").keys("TAB");
+    assert_eq!(x.ed.picker.as_ref().unwrap().query, "forward-char");
+    x.keys("C-g");
+    std::fs::remove_dir_all(d).unwrap();
+}
+
+#[test]
+fn picker_queries_take_the_global_editing_keys() {
+    let (mut x, d) = file_tree();
+    let dir = format!("{}/", d.display());
+    x.keys("C-x C-f").typ("READ");
+    // Typing and deleting happen at the cursor.
+    x.keys("C-b C-b C-d");
+    x.typ("X");
+    assert_eq!(x.ed.picker.as_ref().unwrap().query, format!("{dir}REXD"));
+    x.keys("DEL M-b");
+    assert_eq!(x.ed.picker.as_ref().unwrap().query, format!("{dir}RED"));
+    // DEL in the middle deletes a character, not a directory level.
+    x.keys("C-f DEL");
+    assert_eq!(x.ed.picker.as_ref().unwrap().query, format!("{dir}ED"));
+    // C-k kills to the end (it only kills buffers in the buffer picker); C-y yanks it back.
+    x.keys("C-k");
+    assert_eq!(x.ed.picker.as_ref().unwrap().query, dir);
+    assert_eq!(x.ed.kill_ring.last().map(String::as_str), Some("ED"));
+    x.keys("C-e C-y");
+    assert_eq!(x.ed.picker.as_ref().unwrap().query, format!("{dir}ED"));
+    // C-a then C-k empties the query; DEL at the end still goes up a directory.
+    x.keys("C-a C-k").typ(&dir).keys("DEL");
+    assert_eq!(x.ed.picker.as_ref().unwrap().query, super::files::abbreviate(d.parent().unwrap()) + "/");
+    x.keys("C-g");
+    std::fs::remove_dir_all(d).unwrap();
+}
+
+#[test]
 fn save_buffer_without_a_file_asks_for_one() {
     let d = super::testutil::temp_dir("save");
     let mut x = t("hello|");

@@ -279,17 +279,39 @@ impl EmaxView {
         self.handle_key(key, cx);
     }
 
+    /// Before `key` edits a text field (picker, settings): a yank picks up
+    /// text copied in other apps, as in the buffer.
+    fn field_clipboard_in(&mut self, unbound: bool, key: &Key, cx: &mut Context<Self>) {
+        if unbound
+            && self.ed.field_command(key) == Some("yank")
+            && let Some(t) = cx.read_from_clipboard().and_then(|c| c.text())
+        {
+            self.ed.clipboard_in(t);
+        }
+    }
+
+    /// After a text-field key: publish killed text to the system clipboard.
+    fn field_clipboard_out(&mut self, cx: &mut Context<Self>) {
+        if let Some(s) = self.ed.clipboard_out.take() {
+            cx.write_to_clipboard(ClipboardItem::new_string(s));
+        }
+    }
+
     fn handle_key(&mut self, key: Key, cx: &mut Context<Self>) {
         self.key_started = Some(Instant::now());
 
         if self.ed.settings.is_some() {
+            self.field_clipboard_in(self.settings_keys.lookup(&[key.canonical()]).is_none(), &key, cx);
             self.ed.settings_key(&self.settings_keys, &key);
+            self.field_clipboard_out(cx);
             self.after_settings(true, cx);
             cx.stop_propagation();
             return;
         }
         if self.ed.picker.is_some() {
+            self.field_clipboard_in(self.picker_keys.lookup(&[key.canonical()]).is_none(), &key, cx);
             self.ed.picker_key(&self.picker_keys, &key);
+            self.field_clipboard_out(cx);
             self.after_picker(cx);
             cx.stop_propagation();
             cx.notify();
@@ -618,7 +640,7 @@ impl EmaxView {
                     .border_color(rgba(t.panel_border))
                     .text_size(self.ui(16.0))
                     .child(div().text_color(rgba(t.accent)).child("❯"))
-                    .child(query_with_caret(&query, self.ui(18.0), t))
+                    .child(query_with_caret(&query, p.tail, self.ui(18.0), t))
                     .when(query.is_empty(), |d| {
                         d.child(div().text_color(rgba(t.dim)).child(if commands {
                             "Type to filter commands…"
@@ -752,7 +774,7 @@ impl EmaxView {
             }))
             .child(div().text_color(rgba(t.dim)).child(count))
             .child(div().text_color(rgba(t.accent)).child("❯"))
-            .child(query_with_caret(&query, self.ui(16.0).min(px(lh)), t))
+            .child(query_with_caret(&query, 0, self.ui(16.0).min(px(lh)), t))
             .when(query.is_empty(), |d| {
                 d.child(div().text_color(rgba(t.dim)).child("Search…  (space separates terms)"))
             })
@@ -791,12 +813,17 @@ impl EmaxView {
 
 /// The typed query followed directly by the caret. Spaces are shown as
 /// non-breaking spaces so a trailing space still moves the caret.
-fn query_with_caret(query: &str, caret_h: gpui::Pixels, t: &Theme) -> impl IntoElement {
+/// A text field's text with the caret drawn `tail` bytes before its end.
+fn query_with_caret(query: &str, tail: usize, caret_h: gpui::Pixels, t: &Theme) -> impl IntoElement {
+    let p = emax::engine::line_edit::point(query, tail);
+    let (before, after) = query.split_at(p);
+    let text = |s: &str| div().text_color(rgba(t.emphasis)).child(s.replace(' ', "\u{a0}"));
     div()
         .flex()
         .items_center()
-        .when(!query.is_empty(), |d| d.child(div().text_color(rgba(t.emphasis)).child(query.replace(' ', "\u{a0}"))))
+        .when(!before.is_empty(), |d| d.child(text(before)))
         .child(div().w(px(2.0)).h(caret_h).bg(rgba(t.cursor)))
+        .when(!after.is_empty(), |d| d.child(text(after)))
 }
 
 /// Footer hints like "RET jump    C-s next", using the keys currently bound to

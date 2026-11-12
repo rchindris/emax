@@ -141,7 +141,7 @@ impl EmaxView {
             .text_size(self.ui(14.0))
             .child(div().text_color(rgba(t.dim)).child("⌕"))
             .child(if searching {
-                query_with_caret(&query, self.ui(17.0), t).into_any_element()
+                query_with_caret(&query, s.query_tail, self.ui(17.0), t).into_any_element()
             } else {
                 div().text_color(rgba(t.foreground)).child(query.clone()).into_any_element()
             })
@@ -470,7 +470,7 @@ impl EmaxView {
             _ => s.default_display(st),
         };
         let content = match &editing {
-            Some(input) => query_with_caret(input, self.ui(16.0), t).into_any_element(),
+            Some(input) => query_with_caret(input, s.input_tail, self.ui(16.0), t).into_any_element(),
             None if value.is_empty() => div().text_color(rgba(t.dim)).child(placeholder).into_any_element(),
             None => div()
                 .overflow_hidden()

@@ -138,7 +138,7 @@ same keys. Setting an entry to `null` removes a default binding:
 | `theme` | The theme to use (default `"emax-dark"`), or `{ "light": …, "dark": … }` to follow the system appearance |
 | `themes` | Theme definitions; see [Themes](#themes) |
 | `keymaps.global` | Editing keys; multi-key sequences like `"C-x C-s"` work. Values are command names (`forward-char`, `swiper`, …) |
-| `keymaps.picker` | Keys while the buffer picker is open; values are `picker-*` actions |
+| `keymaps.picker` | Keys while a picker is open; values are `picker-*` actions (`TAB` is `picker-complete`). Keys left unbound edit the query like the global ones (`C-a`, `C-d`, `M-f`, `C-y`…) |
 | `keymaps.search` | Keys while the search panel is open; values are `search-*` actions |
 | `modes` | Major and minor modes; see [Modes](#modes) |
 
@@ -283,6 +283,7 @@ src/
     settings.rs      the settings editor (s-,): setting schema, search, writes to the user file
     syntax.rs        tree-sitter parsing and highlighting; the list of languages
     picker.rs        fuzzy "completing read" picker (buffer switching, M-x)
+    line_edit.rs     Emacs line editing in picker and settings text fields
     text.rs          pure motion primitives: words, sentences, paragraphs, sexps
     tests.rs         behavioural tests driven by real key sequences
 ```

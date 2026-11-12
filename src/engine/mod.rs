@@ -10,6 +10,7 @@ pub mod editor;
 pub mod files;
 pub mod hooks;
 pub mod keymap;
+pub mod line_edit;
 pub mod modes;
 pub mod picker;
 pub mod pty;

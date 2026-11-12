@@ -17,6 +17,7 @@ use super::config::{DEFAULT_JSON, user_config_path};
 use super::editor::Editor;
 use super::files::abbreviate;
 use super::keymap::{Key, Keymap};
+use super::line_edit::{self, FieldEdit};
 
 /// What the settings keymap can bind keys to.
 pub const SETTINGS_ACTIONS: &[&str] = &[
@@ -173,6 +174,10 @@ pub struct SettingsEditor {
     /// Why the user file can't be edited (it isn't a JSON object).
     pub file_error: Option<String>,
     pub query: String,
+    /// The cursor in `query`, as bytes after it (see `line_edit`).
+    pub query_tail: usize,
+    /// The cursor in the text field being edited, likewise.
+    pub input_tail: usize,
     /// Indices into `SETTINGS` that the query keeps, in section order.
     pub matches: Vec<usize>,
     /// Index into `matches`.
@@ -206,6 +211,8 @@ impl SettingsEditor {
             user,
             file_error,
             query: String::new(),
+            query_tail: 0,
+            input_tail: 0,
             matches: Vec::new(),
             selected: 0,
             ranked: false,
@@ -415,6 +422,7 @@ impl SettingsEditor {
             self.edit = Some(Edit::Choice { options, index });
         } else {
             self.edit = Some(Edit::Text { input: self.display(s), error: None });
+            self.input_tail = 0;
         }
     }
 
@@ -472,38 +480,29 @@ impl SettingsEditor {
         }
     }
 
-    /// Type into the search field, or into the field being edited.
+    /// Type into the search field, or into the field being edited, at the cursor.
     pub fn insert(&mut self, text: &str) {
         self.message = None;
-        match &mut self.edit {
-            Some(Edit::Text { input, error }) => {
-                input.push_str(text);
-                *error = None;
-            }
-            Some(Edit::Choice { .. }) => {}
-            None => {
-                self.query.push_str(text);
-                self.refilter();
-            }
-        }
+        self.edit_field(|s, tail| line_edit::insert(s, *tail, text));
     }
 
-    /// The text the editing keys work on: the field being edited, else the query.
-    fn field(&mut self) -> Option<&mut String> {
+    /// The text the editing keys work on and its cursor: the field being
+    /// edited, else the query.
+    pub(crate) fn field(&mut self) -> Option<(&mut String, &mut usize)> {
         match &mut self.edit {
             Some(Edit::Text { input, error }) => {
                 *error = None;
-                Some(input)
+                Some((input, &mut self.input_tail))
             }
             Some(Edit::Choice { .. }) => None,
-            None => Some(&mut self.query),
+            None => Some((&mut self.query, &mut self.query_tail)),
         }
     }
 
-    fn edit_field(&mut self, f: impl FnOnce(&mut String)) {
+    fn edit_field(&mut self, f: impl FnOnce(&mut String, &mut usize)) {
         let searching = self.edit.is_none();
-        if let Some(s) = self.field() {
-            f(s);
+        if let Some((s, tail)) = self.field() {
+            f(s, tail);
         }
         if searching {
             self.refilter();
@@ -546,6 +545,7 @@ impl SettingsEditor {
                     self.edit = None;
                 } else if !self.query.is_empty() {
                     self.query.clear();
+                    self.query_tail = 0;
                     self.refilter();
                 } else {
                     return false;
@@ -584,15 +584,16 @@ impl SettingsEditor {
                     _ => self.select(self.matches.len().saturating_sub(1)),
                 }
             }
-            "settings-delete-char" => self.edit_field(|s| {
-                s.pop();
+            "settings-delete-char" => self.edit_field(|s, tail| {
+                line_edit::delete_backward(s, *tail);
             }),
-            "settings-delete-word" => self.edit_field(|s| {
-                let t = s.trim_end_matches(|c: char| !c.is_alphanumeric()).len();
-                let w = s[..t].trim_end_matches(char::is_alphanumeric).len();
-                s.truncate(w);
+            "settings-delete-word" => self.edit_field(|s, tail| {
+                line_edit::kill_word_backward(s, *tail);
             }),
-            "settings-clear" => self.edit_field(String::clear),
+            "settings-clear" => self.edit_field(|s, tail| {
+                s.clear();
+                *tail = 0;
+            }),
             "settings-reset" => self.reset(self.selected),
             _ => {}
         }
@@ -619,6 +620,10 @@ impl Editor {
     pub fn settings_key(&mut self, keymap: &Keymap, key: &Key) {
         match keymap.lookup(&[key.canonical()]) {
             Some(action) => self.settings_action(action),
+            None if self.field_command(key).is_some() => {
+                let cmd = self.field_command(key).unwrap();
+                self.settings_field_command(cmd);
+            }
             None => {
                 if let Some(t) = key.insertable_text().map(str::to_string)
                     && let Some(s) = self.settings.as_mut()
@@ -629,10 +634,29 @@ impl Editor {
         }
     }
 
+    /// Run text-field command `cmd` (`C-a`, `C-d`, `M-f`, `C-y`...) on the
+    /// field being edited, else the search.
+    pub fn settings_field_command(&mut self, cmd: &str) {
+        let Some(mut s) = self.settings.take() else { return };
+        s.message = None;
+        let searching = s.edit.is_none();
+        let edit = s.field().and_then(|(text, tail)| self.run_field_command(text, tail, cmd));
+        if searching && edit.is_some_and(|e| e != FieldEdit::Moved) {
+            s.refilter();
+        }
+        self.settings = Some(s);
+    }
+
     /// Run a settings action (one of `SETTINGS_ACTIONS`).
     pub fn settings_action(&mut self, action: &str) {
         if action == "settings-open-json" {
             return self.open_settings_json();
+        }
+        // In a text field, the reset key kills to the end of the field instead.
+        if action == "settings-reset"
+            && self.settings.as_ref().is_some_and(|s| matches!(s.edit, Some(Edit::Text { .. })))
+        {
+            return self.settings_field_command("kill-line");
         }
         let Some(s) = self.settings.as_mut() else { return };
         if !s.action(action) {

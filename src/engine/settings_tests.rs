@@ -228,3 +228,35 @@ fn super_comma_opens_settings() {
     assert_eq!(c.modes.global.lookup(&["s-,".into()]), Some("open-settings"));
     assert_eq!(ks.settings.lookup(&["s-,".into()]), Some("settings-close"));
 }
+
+#[test]
+fn text_fields_take_the_global_editing_keys() {
+    let (mut ed, km, path) = open(None);
+    // In the search field.
+    typ(&mut ed, &km, "fil column");
+    keys(&mut ed, &km, "C-a M-f");
+    typ(&mut ed, &km, "l");
+    assert_eq!(s(&ed).query, "fill column");
+    keys(&mut ed, &km, "C-a C-d C-e");
+    assert_eq!(s(&ed).query, "ill column");
+    keys(&mut ed, &km, "C-a");
+    typ(&mut ed, &km, "f");
+    // In a value being edited: the cursor starts at the end.
+    keys(&mut ed, &km, "RET");
+    assert_eq!(s(&ed).edit, Some(Edit::Text { input: "70".into(), error: None }));
+    keys(&mut ed, &km, "C-b DEL");
+    typ(&mut ed, &km, "8");
+    keys(&mut ed, &km, "C-e");
+    typ(&mut ed, &km, "0");
+    assert_eq!(s(&ed).edit, Some(Edit::Text { input: "800".into(), error: None }));
+    keys(&mut ed, &km, "C-a C-d C-d DEL C-f C-k");
+    assert_eq!(s(&ed).edit, Some(Edit::Text { input: "0".into(), error: None }));
+    // C-y yanks what M-DEL killed.
+    keys(&mut ed, &km, "C-e M-DEL");
+    assert_eq!(s(&ed).edit, Some(Edit::Text { input: "".into(), error: None }));
+    typ(&mut ed, &km, "9");
+    keys(&mut ed, &km, "C-a");
+    ed.clipboard_in("1".into());
+    keys(&mut ed, &km, "C-y RET");
+    assert_eq!(file(&path)["editor"]["fill_column"], 19);
+}
