@@ -56,16 +56,29 @@ The Steel engine is not `Send` (it uses `Rc`); it is created on, and never
 leaves, the daemon's main-loop thread. Scheme never blocks: waits are
 registered requests the main loop resolves when an event satisfies them.
 
-## M0 — Steel host (`src/engine/steel/`)
+## M0 — Steel host (`src/engine/script/`) — done
 
-- `steel-core = "0.8"` (verified: builds on our toolchain, ~1 min clean).
-- `ScriptHost`: wraps `steel::steel_vm::engine::Engine`; `load_builtin(name,
-  src)`, `load_dir(path)` (user scripts, `~/.config/ymacs/steel/*.scm`),
-  `call(fn, args) -> Result<SteelVal, String>`. Script errors never crash the
-  host: they are logged and the failing handler is skipped.
-- Host API is registered through a trait the daemon implements, so the
-  same module can later be embedded in the editor (editor plugins).
-- Built-in scripts are `include_str!`-ed from `steel/` at the repo root.
+- `steel-core = "0.8.3"` (~1 min clean build); `regex` for `regex-match?`.
+- `ScriptHost` wraps the engine: `with_builtins`, `load(name, src)`,
+  `load_file`, `load_dir` (user scripts, `steel/*.scm` next to the user
+  config, name order), `eval`, `call`, `emit(event, args)`, `handles(event)`,
+  `next_deadline()` / `fire_due(now)` for the host's loop. Script errors
+  never crash the host: loads return them, failing handlers and timers are
+  logged through the host and skipped.
+- The host API is the `Host` trait (screens, process, env, input,
+  `agent-set!`/`agent-clear!`, log). Every entry point takes `&mut dyn Host`
+  for the duration of the call; registered functions reach it through a
+  scoped thread-local pointer, taken out while in use, so no two `&mut`
+  coexist and nothing outlives the call.
+- Steel requires registered Rust functions to be `Send + Sync`, and its
+  values are not, so Scheme values never live in Rust: handlers and timer
+  callbacks are kept by a small Scheme prelude (`on`, `run-after`,
+  `cancel-timer`); Rust keeps only event names, timer ids and deadlines.
+- Built-in scripts are `include_str!`-ed from `steel/` (`core.scm`:
+  `find-line`, `any-line?`, `debounce`).
+- Startup: ~80 ms per engine (release and debug alike, deps are optimised).
+  Fine for the daemon, which starts once; the editor should create its
+  engine lazily.
 
 ## M1 — Screens and process facts in the daemon
 

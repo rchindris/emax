@@ -270,6 +270,7 @@ you had. The `configured` entry returns to the theme from your config.
 ```
 config/
   default.json       built-in settings, key bindings and modes
+steel/               built-in Steel (Scheme) scripts, compiled into the binary
 packaging/           Homebrew formula and Debian build helpers used by the release workflow
 .github/workflows/   CI (fmt, clippy, audit, tests) and release (brew + deb) pipelines
 src/
@@ -290,6 +291,7 @@ src/
     files.rs         find-file's path picker (also dired's target prompts)
     settings.rs      the settings editor (s-,): setting schema, search, writes to the user file
     syntax.rs        tree-sitter parsing and highlighting; the list of languages
+    script/          embedded Steel engine: the Scheme API, event handlers, timers
     picker.rs        fuzzy "completing read" picker (buffer switching, M-x, load-theme)
     line_edit.rs     Emacs line editing in picker and settings text fields
     text.rs          pure motion primitives: words, sentences, paragraphs, sexps

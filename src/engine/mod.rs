@@ -14,6 +14,7 @@ pub mod line_edit;
 pub mod modes;
 pub mod picker;
 pub mod pty;
+pub mod script;
 pub mod search;
 pub mod session;
 pub mod settings;
