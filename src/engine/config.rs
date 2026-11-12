@@ -36,6 +36,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -81,6 +82,7 @@ struct RawTerminal {
     #[serde(deserialize_with = "nullable")]
     socket: Option<Option<PathBuf>>,
     escape_keys: Option<Vec<String>>,
+    daemon_idle_exit: Option<u64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -206,6 +208,9 @@ pub struct TerminalConfig {
     pub replay_bytes: usize,
     /// The daemon's socket (`None`: `session::default_socket_path`).
     pub socket: Option<PathBuf>,
+    /// A daemon the editor starts exits after this long with no sessions
+    /// and no editor connected (`None`: never; `0` in the file).
+    pub daemon_idle_exit: Option<Duration>,
     /// Keys that start an editor key sequence in char mode (canonical form).
     pub escape_keys: Vec<String>,
     /// Bindings for terminal buffers, looked up before the other keymaps.
@@ -222,6 +227,7 @@ impl Default for TerminalConfig {
             backend: PtyBackendKind::Daemon,
             replay_bytes: 2 << 20,
             socket: None,
+            daemon_idle_exit: Some(Duration::from_secs(60)),
             escape_keys: vec!["C-x".into(), "M-x".into(), "C-c".into()],
             keymap: Keymap::new(),
         }
@@ -451,6 +457,9 @@ fn merge_terminal(t: &mut TerminalConfig, raw: RawTerminal, label: &str, warning
     }
     if let Some(v) = raw.socket {
         t.socket = v;
+    }
+    if let Some(secs) = raw.daemon_idle_exit {
+        t.daemon_idle_exit = (secs > 0).then(|| Duration::from_secs(secs));
     }
     if let Some(keys) = raw.escape_keys {
         t.escape_keys = keys

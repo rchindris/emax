@@ -205,7 +205,7 @@ impl Editor {
                 PtyBackendKind::Local => Box::new(LocalBackend::new(waker)),
                 PtyBackendKind::Daemon => {
                     let socket = cfg.socket.clone().unwrap_or_else(super::session::default_socket_path);
-                    match DaemonBackend::connect_or_start(&socket, cfg.replay_bytes, waker.clone()) {
+                    match DaemonBackend::connect_or_start(&socket, cfg.replay_bytes, cfg.daemon_idle_exit, waker.clone()) {
                         Ok(b) => Box::new(b),
                         Err(e) => {
                             self.message = Some(format!("Session daemon unavailable ({e}); terminals will end with the editor"));
