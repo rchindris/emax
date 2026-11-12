@@ -91,6 +91,7 @@ fn main() {
     }
     let keymaps = config.keymaps;
     let appearance = config.appearance;
+    ed.themes = appearance.available.iter().map(|t| (t.name.clone(), t.is_dark())).collect();
 
     Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1100.0), px(760.0)), cx);

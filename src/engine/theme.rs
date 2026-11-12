@@ -33,6 +33,8 @@ macro_rules! theme_colors {
         /// Every color the UI draws with.
         #[derive(Clone, Debug, PartialEq)]
         pub struct Theme {
+            /// The theme's name in the config (`emax-dark`, …).
+            pub name: String,
             $( $(#[doc = $doc])* pub $field: Rgba, )*
             /// Syntax highlighting colors by capture name (`keyword`,
             /// `function.method`…), set as `syntax.<name>` (see `syntax_color`).
@@ -44,7 +46,7 @@ macro_rules! theme_colors {
             pub const COLOR_NAMES: &[&str] = &[$(stringify!($field)),*];
 
             /// A theme defining every color itself (no inheritance).
-            pub(crate) fn complete(entries: &BTreeMap<String, String>) -> Result<Self, String> {
+            pub(crate) fn complete(name: &str, entries: &BTreeMap<String, String>) -> Result<Self, String> {
                 let color = |name: &str| {
                     let v = entries.get(name).ok_or_else(|| format!("no color for {name}"))?;
                     parse_color(v).ok_or_else(|| format!("{name}: \"{v}\" is not a color"))
@@ -56,7 +58,7 @@ macro_rules! theme_colors {
                         syntax.insert(name.to_string(), c);
                     }
                 }
-                Ok(Self { $( $field: color(stringify!($field))?, )* syntax })
+                Ok(Self { name: name.to_string(), $( $field: color(stringify!($field))?, )* syntax })
             }
 
             fn slot(&mut self, name: &str) -> Option<&mut Rgba> {
@@ -216,6 +218,7 @@ fn resolve_inner(
         None => fallback.clone(),
     };
     chain.pop();
+    theme.name = name.to_string();
 
     let mut missing: Vec<&str> = Theme::COLOR_NAMES.to_vec();
     for (key, value) in entries {
@@ -256,6 +259,12 @@ fn resolve_inner(
     Some(theme)
 }
 
+/// Build every theme in `raw`, sorted by name. Each one's problems are
+/// reported once; a theme that can't be built at all is left out.
+pub(crate) fn resolve_all(raw: &RawThemes, fallback: &Theme, warnings: &mut Vec<String>) -> Vec<Theme> {
+    raw.keys().filter_map(|name| resolve(name, raw, fallback, warnings)).collect()
+}
+
 /// The fonts the editor uses.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Fonts {
@@ -265,16 +274,20 @@ pub struct Fonts {
     pub ui_family: String,
     /// Size of buffer text, in pixels.
     pub size: f32,
+    /// The size the panels (picker, search, tab bar) are drawn for, in pixels.
+    pub ui_size: f32,
     /// Height of a text line, in pixels (whole pixels keep scrolling exact).
     pub line_height: f32,
 }
 
 impl Fonts {
-    pub fn new(family: &str, ui_family: &str, size: f32, line_height: f32) -> Self {
+    /// `ui_size` defaults to `size`, so the panels follow the buffer text.
+    pub fn new(family: &str, ui_family: &str, size: f32, ui_size: Option<f32>, line_height: f32) -> Self {
         Self {
             family: resolve_family(family),
             ui_family: resolve_family(ui_family),
             size,
+            ui_size: ui_size.unwrap_or(size),
             line_height: (size * line_height).round().max(1.0),
         }
     }
@@ -308,6 +321,13 @@ pub struct Themes {
 }
 
 impl Theme {
+    /// Whether this is a dark theme (its background is darker than mid-grey).
+    pub fn is_dark(&self) -> bool {
+        let channel = |shift: u32| ((self.background >> shift) & 0xff) as f32 / 255.0;
+        let luma = 0.2126 * channel(24) + 0.7152 * channel(16) + 0.0722 * channel(8);
+        luma < 0.5
+    }
+
     /// The 16 ANSI colors terminals draw with (0–7 normal, 8–15 bright).
     pub fn ansi(&self) -> [Rgba; 16] {
         [
@@ -353,10 +373,11 @@ mod tests {
 
     #[test]
     fn generic_font_names() {
-        let f = Fonts::new("monospace", "system-ui", 14.0, 1.5);
+        let f = Fonts::new("monospace", "system-ui", 14.0, None, 1.5);
         assert_eq!(f.family, PLATFORM_MONOSPACE);
         assert_eq!(f.ui_family, ".SystemUIFont");
-        assert_eq!(f.line_height, 21.0);
-        assert_eq!(Fonts::new("Iosevka", "Inter", 13.0, 1.4).line_height, 18.0);
+        assert_eq!((f.line_height, f.ui_size), (21.0, 14.0));
+        let g = Fonts::new("Iosevka", "Inter", 13.0, Some(15.0), 1.4);
+        assert_eq!((g.line_height, g.ui_size), (18.0, 15.0));
     }
 }

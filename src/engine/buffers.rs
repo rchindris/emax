@@ -1,12 +1,12 @@
 //! Multiple buffers: the current one lives in `Editor.buf`/`cursors`; the
 //! others are parked in `Editor.others` in most-recently-used order, each with
-//! its own cursors. Also the picker's actions, for switch-to-buffer and M-x (find-file's are in
-//! `files.rs`).
+//! its own cursors. Also the picker's actions, for switch-to-buffer, M-x and load-theme
+//! (find-file's are in `files.rs`).
 
 use super::buffer::Buffer;
 use super::commands;
 use super::cursor::Cursor;
-use super::editor::{Args, Editor, RawArg, Scroll};
+use super::editor::{Args, Editor, RawArg, Scroll, ThemeRequest};
 use super::hooks::Event;
 use super::keymap::{Key, Keymap, where_is};
 use super::line_edit::{self, FieldEdit};
@@ -201,7 +201,8 @@ impl Editor {
     // ---------------------------------------------------------- the picker
 
     fn buffer_candidates(&self) -> Vec<Candidate> {
-        let home = std::env::var("HOME").unwrap_or_default();
+        // HOME on Unix; Windows has USERPROFILE instead.
+        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
         let cand = |id: u64, b: &Buffer, current: bool| {
             let detail = b
                 .path
@@ -279,6 +280,59 @@ impl Editor {
         self.picker = Some(Picker::new(&prompt, candidates).with_kind(PickerKind::Commands { names, args }));
     }
 
+    // ---------------------------------------------------------- load-theme
+
+    /// Open load-theme: every theme, then an entry for the configured theme(s).
+    /// The active theme is selected, so the preview starts from what's on screen.
+    pub fn open_theme_picker(&mut self) {
+        let names: Vec<String> = self.themes.iter().map(|(n, _)| n.clone()).collect();
+        let mut candidates: Vec<Candidate> = self
+            .themes
+            .iter()
+            .enumerate()
+            .map(|(i, (name, dark))| Candidate {
+                id: i as u64,
+                label: name.clone(),
+                detail: String::new(),
+                annotation: if *dark { "dark" } else { "light" }.to_string(),
+                modified: false,
+                current: *name == self.active_theme,
+            })
+            .collect();
+        candidates.push(Candidate {
+            id: names.len() as u64,
+            label: CONFIGURED_THEME.to_string(),
+            detail: "the theme from your config (following the system's light/dark setting if it names both)".into(),
+            annotation: String::new(),
+            modified: false,
+            current: false,
+        });
+        let mut p = Picker::new("Load theme", candidates).with_kind(PickerKind::Themes { names });
+        if let Some(i) = p.matches.iter().position(|m| p.candidates[m.index].current) {
+            p.selected = i;
+        }
+        self.picker = Some(p);
+    }
+
+    /// The theme the open load-theme picker has selected (for live preview):
+    /// `None` when another picker is open or nothing is selected.
+    pub fn theme_preview(&self) -> Option<ThemeRequest> {
+        let p = self.picker.as_ref()?;
+        let PickerKind::Themes { names } = &p.kind else { return None };
+        let c = p.selected_candidate()?;
+        Some(names.get(c.id as usize).map_or(ThemeRequest::Configured, |n| ThemeRequest::Named(n.clone())))
+    }
+
+    /// Close load-theme and hand the choice to the view.
+    fn load_theme_from_picker(&mut self, request: ThemeRequest) {
+        self.picker = None;
+        self.message = Some(match &request {
+            ThemeRequest::Named(n) => format!("Loaded theme {n}"),
+            ThemeRequest::Configured => "Back to the configured theme".into(),
+        });
+        self.theme_request = Some(request);
+    }
+
     /// Close M-x and hand `name` to the view to run.
     fn run_from_picker(&mut self, name: &'static str) {
         let Some(Picker { kind: PickerKind::Commands { args, .. }, .. }) = self.picker.take() else { return };
@@ -307,6 +361,11 @@ impl Editor {
                 self.run_from_picker(name);
             }
             PickerKind::Files { .. } => self.file_picker_accept(i),
+            PickerKind::Themes { names } => {
+                let request =
+                    names.get(id as usize).map_or(ThemeRequest::Configured, |n| ThemeRequest::Named(n.clone()));
+                self.load_theme_from_picker(request);
+            }
         }
     }
 
@@ -393,6 +452,27 @@ impl Editor {
                 _ => {}
             }
         }
+        if let PickerKind::Themes { names } = &p.kind {
+            match action {
+                "picker-accept" if p.selected_candidate().is_some() => {
+                    let i = p.selected;
+                    return self.picker_accept(i);
+                }
+                "picker-accept" | "picker-accept-input" => {
+                    let typed = p.query.trim();
+                    match names.iter().find(|n| *n == typed) {
+                        Some(n) => {
+                            let request = ThemeRequest::Named(n.clone());
+                            self.load_theme_from_picker(request);
+                        }
+                        None => p.message = Some("No match".into()),
+                    }
+                    return;
+                }
+                "picker-kill-buffer" => return self.picker_field_command("kill-line"),
+                _ => {}
+            }
+        }
         match action {
             "picker-quit" => {
                 self.picker = None;
@@ -451,6 +531,9 @@ impl Editor {
         }
     }
 }
+
+/// The load-theme entry that goes back to the configured theme(s).
+pub const CONFIGURED_THEME: &str = "configured";
 
 fn group_digits(n: usize) -> String {
     let s = n.to_string();

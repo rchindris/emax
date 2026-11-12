@@ -1,6 +1,6 @@
 //! A generic "completing read" picker: a query, a list of candidates, fuzzy
 //! filtering with match positions (for highlighting) and a selection.
-//! Used by switch-to-buffer, M-x and find-file.
+//! Used by switch-to-buffer, M-x, find-file and load-theme.
 
 use super::editor::Args;
 use super::line_edit;
@@ -16,6 +16,9 @@ pub enum PickerKind {
     /// A file: the query is a path, the candidates are the entries of the
     /// directory part `dir` (as typed), filtered by the last path component.
     Files { dir: String, purpose: FilePurpose },
+    /// A theme to load. `Candidate::id` indexes `names`; the id `names.len()`
+    /// stands for going back to the configured theme(s).
+    Themes { names: Vec<String> },
 }
 
 /// What a file picker's chosen path is for.

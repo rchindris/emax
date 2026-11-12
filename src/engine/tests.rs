@@ -779,6 +779,46 @@ fn modes_config_problems_are_reported() {
 }
 
 #[test]
+fn load_theme_previews_loads_and_cancels() {
+    let mut x = t("|text");
+    x.ed.themes = vec![("emax-dark".into(), true), ("emax-light".into(), false), ("solarized-light".into(), false)];
+    x.ed.active_theme = "emax-dark".into();
+    x.keys("M-x").typ("load-theme").keys("RET");
+    // Opens on the theme on screen, which previews unchanged.
+    let p = x.ed.picker.as_ref().unwrap();
+    assert_eq!(p.selected_candidate().unwrap().label, "emax-dark");
+    assert!(p.selected_candidate().unwrap().current);
+    assert_eq!(p.selected_candidate().unwrap().annotation, "dark");
+    assert_eq!(x.ed.theme_preview(), Some(ThemeRequest::Named("emax-dark".into())));
+    // Moving previews; cancelling loads nothing.
+    x.keys("C-n");
+    assert_eq!(x.ed.theme_preview(), Some(ThemeRequest::Named("emax-light".into())));
+    x.keys("C-g");
+    assert!(x.ed.picker.is_none() && x.ed.theme_request.is_none() && x.ed.theme_preview().is_none());
+    // Filtering and RET loads the theme.
+    x.keys("M-x").typ("load-theme").keys("RET").typ("sol light").keys("RET");
+    assert!(x.ed.picker.is_none());
+    assert_eq!(x.ed.theme_request.take(), Some(ThemeRequest::Named("solarized-light".into())));
+    assert_eq!(x.ed.message.as_deref(), Some("Loaded theme solarized-light"));
+    // The last entry goes back to the configured theme.
+    x.keys("M-x").typ("load-theme").keys("RET").typ("configured").keys("RET");
+    assert_eq!(x.ed.theme_request.take(), Some(ThemeRequest::Configured));
+    // No match keeps the picker open; the buffer is untouched throughout.
+    x.keys("M-x").typ("load-theme").keys("RET").typ("zzqq").keys("RET");
+    assert!(x.ed.picker.is_some());
+    x.keys("C-g");
+    assert_eq!(x.show(), "|text");
+}
+
+#[test]
+fn load_theme_without_themes() {
+    let mut x = t("|text");
+    x.keys("M-x").typ("load-theme").keys("RET");
+    assert!(x.ed.picker.is_none());
+    assert_eq!(x.ed.message.as_deref(), Some("No themes are defined"));
+}
+
+#[test]
 fn execute_extended_command() {
     let mut x = t("hello |world");
     x.keys("M-x");

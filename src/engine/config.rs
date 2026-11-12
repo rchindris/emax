@@ -5,6 +5,7 @@
 //!
 //! - `$EMAX_CONFIG`, or
 //! - `$XDG_CONFIG_HOME/emax/config.json`, or
+//! - on Windows, `%APPDATA%\emax\config.json`, or
 //! - `~/.config/emax/config.json`.
 //!
 //! The user file only needs what it changes. Settings replace the defaults;
@@ -167,6 +168,8 @@ struct RawFont {
     family: Option<String>,
     ui_family: Option<String>,
     size: Option<f32>,
+    /// `null` (the default): the panels follow `size`.
+    ui_size: Option<f32>,
     line_height: Option<f32>,
 }
 
@@ -292,7 +295,17 @@ impl Keymaps {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Appearance {
     pub fonts: Fonts,
+    /// The configured themes (`theme`): one for a light and one for a dark system appearance.
     pub themes: Themes,
+    /// Every theme defined, sorted by name (for `load-theme`).
+    pub available: Vec<Theme>,
+}
+
+impl Appearance {
+    /// The theme called `name`, if it is defined.
+    pub fn theme_named(&self, name: &str) -> Option<&Theme> {
+        self.available.iter().find(|t| t.name == name)
+    }
 }
 
 pub struct Config {
@@ -344,6 +357,7 @@ impl Config {
         let mut settings = Settings::default();
         let (mut family, mut ui_family) = ("monospace".to_string(), "system-ui".to_string());
         let (mut size, mut line_height) = (14.0_f32, 1.5_f32);
+        let mut ui_size: Option<f32> = None;
         let mut theme_choice = RawThemeChoice::One(DEFAULT_THEME.to_string());
         let mut raw_themes = RawThemes::new();
         let mut maps: BTreeMap<&'static str, BTreeMap<String, String>> =
@@ -381,6 +395,13 @@ impl Config {
                     warnings.push(format!("{label}: font.size must be between 4 and 200"))
                 }
                 Some(v) => size = v,
+                None => {}
+            }
+            match font.ui_size {
+                Some(v) if !(4.0..=200.0).contains(&v) => {
+                    warnings.push(format!("{label}: font.ui_size must be between 4 and 200"))
+                }
+                Some(v) => ui_size = Some(v),
                 None => {}
             }
             match font.line_height {
@@ -442,8 +463,9 @@ impl Config {
         let modes = build_modes(modes_acc, settings, &maps["global"], &mut warnings);
         terminal.keymap = build_keymap("keymaps.terminal", &maps["terminal"], &resolve_global, false, &mut warnings);
         let fallback = builtin_default_theme();
+        let available = theme::resolve_all(&raw_themes, &fallback, &mut warnings);
         let mut pick = |name: &str| {
-            theme::resolve(name, &raw_themes, &fallback, &mut warnings).unwrap_or_else(|| {
+            available.iter().find(|t| t.name == name).cloned().unwrap_or_else(|| {
                 if !raw_themes.contains_key(name) {
                     let known: Vec<&str> = raw_themes.keys().map(String::as_str).collect();
                     warnings.push(format!("theme: unknown theme \"{name}\" (known: {})", known.join(", ")));
@@ -458,7 +480,8 @@ impl Config {
             }
             RawThemeChoice::ByAppearance { light, dark } => Themes { light: pick(&light), dark: pick(&dark) },
         };
-        let appearance = Appearance { fonts: Fonts::new(&family, &ui_family, size, line_height), themes };
+        let fonts = Fonts::new(&family, &ui_family, size, ui_size, line_height);
+        let appearance = Appearance { fonts, themes, available };
         Self { modes, appearance, keymaps, terminal, session, user_file: None, warnings }
     }
 }
@@ -519,7 +542,8 @@ fn merge_terminal(t: &mut TerminalConfig, raw: RawTerminal, label: &str, warning
 /// base for themes that don't name one to inherit.
 fn builtin_default_theme() -> Theme {
     let raw: RawConfig = serde_json::from_str(DEFAULT_JSON).expect("built-in config is valid JSON");
-    Theme::complete(&raw.themes[DEFAULT_THEME]).unwrap_or_else(|e| panic!("built-in {DEFAULT_THEME}: {e}"))
+    Theme::complete(DEFAULT_THEME, &raw.themes[DEFAULT_THEME])
+        .unwrap_or_else(|e| panic!("built-in {DEFAULT_THEME}: {e}"))
 }
 
 fn resolve_global(name: &str) -> Option<&'static str> {
@@ -780,13 +804,17 @@ fn is_key_name(name: &str) -> bool {
 
 /// Where the user's configuration file is read from.
 pub fn user_config_path() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("EMAX_CONFIG").filter(|p| !p.is_empty()) {
-        return Some(PathBuf::from(p));
+    user_config_path_in(&|name| std::env::var_os(name), cfg!(windows))
+}
+
+fn user_config_path_in(env: &dyn Fn(&str) -> Option<std::ffi::OsString>, windows: bool) -> Option<PathBuf> {
+    let var = |name: &str| env(name).filter(|p| !p.is_empty()).map(PathBuf::from);
+    if let Some(p) = var("EMAX_CONFIG") {
+        return Some(p);
     }
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|p| !p.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    let base = var("XDG_CONFIG_HOME")
+        .or_else(|| if windows { var("APPDATA") } else { None })
+        .or_else(|| var("HOME").map(|h| h.join(".config")))?;
     Some(base.join("emax").join("config.json"))
 }
 
@@ -939,7 +967,7 @@ mod tests {
         // The built-in light theme is complete on its own.
         let raw: RawConfig = serde_json::from_str(DEFAULT_JSON).unwrap();
         for (name, entries) in &raw.themes {
-            Theme::complete(entries).unwrap_or_else(|e| panic!("built-in theme {name}: {e}"));
+            Theme::complete(name, entries).unwrap_or_else(|e| panic!("built-in theme {name}: {e}"));
         }
     }
 
@@ -965,6 +993,38 @@ mod tests {
         assert_eq!(a.themes.light.background, 0xfffff0ff);
         assert_eq!(a.themes.light.foreground, 0x383a42ff);
         assert_ne!(a.themes.get(false).background, a.themes.get(true).background);
+    }
+
+    #[test]
+    fn every_theme_is_available_by_name() {
+        let user = r##"{ "font": { "ui_size": 12 }, "themes": { "paper": { "inherits": "emax-light" } } }"##;
+        let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", user)]);
+        assert!(c.warnings.is_empty(), "{:#?}", c.warnings);
+        let a = &c.appearance;
+        let names: Vec<&str> = a.available.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["emax-dark", "emax-light", "paper", "solarized-dark", "solarized-light"]);
+        assert_eq!(a.theme_named("paper").unwrap().background, a.theme_named("emax-light").unwrap().background);
+        assert!(a.theme_named("solarized-dark").unwrap().is_dark());
+        assert!(!a.theme_named("paper").unwrap().is_dark());
+        assert_eq!(a.themes.dark.name, "emax-dark");
+        assert_eq!((a.fonts.size, a.fonts.ui_size), (14.0, 12.0));
+        assert_eq!(Config::builtin().appearance.fonts.ui_size, 14.0, "follows font.size by default");
+    }
+
+    #[test]
+    fn user_config_path_precedence() {
+        let env = |vars: &'static [(&'static str, &'static str)]| {
+            move |name: &str| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| std::ffi::OsString::from(v))
+        };
+        let all =
+            env(&[("EMAX_CONFIG", "/e.json"), ("XDG_CONFIG_HOME", "/xdg"), ("APPDATA", "C:/AppData"), ("HOME", "/h")]);
+        assert_eq!(user_config_path_in(&all, true), Some(PathBuf::from("/e.json")));
+        let no_override = env(&[("XDG_CONFIG_HOME", "/xdg"), ("APPDATA", "C:/AppData"), ("HOME", "/h")]);
+        assert_eq!(user_config_path_in(&no_override, true), Some(PathBuf::from("/xdg/emax/config.json")));
+        let windows = env(&[("APPDATA", "C:/AppData"), ("HOME", "/h")]);
+        assert_eq!(user_config_path_in(&windows, true), Some(PathBuf::from("C:/AppData/emax/config.json")));
+        assert_eq!(user_config_path_in(&windows, false), Some(PathBuf::from("/h/.config/emax/config.json")));
+        assert_eq!(user_config_path_in(&env(&[]), true), None);
     }
 
     #[test]

@@ -164,6 +164,7 @@ commands! {
     "execute-extended-command" => execute_extended, NO_UNDO, "Pick a command by name (fuzzy) and run it.";
     "open-settings" => open_settings, NO_UNDO, "Edit the settings in a searchable list; changes are saved to the settings file and apply at once.";
     "open-settings-json" => open_settings_json, NO_UNDO, "Visit the settings file (created if it doesn't exist); saving it applies it.";
+    "load-theme" => load_theme, NO_UNDO, "Pick a theme (fuzzy), previewed as you move; RET keeps it for this session.";
 
     // minor modes (major mode commands come from the configuration)
     "auto-fill-mode" => auto_fill_mode, NO_UNDO, "Toggle breaking lines at fill-column while typing (with N: on if N > 0).";
@@ -1563,6 +1564,14 @@ fn quit(ed: &mut Editor, _: &Args) -> CmdResult {
     }
     ed.quit_requested = true;
     ed.emit(super::hooks::Event::KillEmacs);
+    Ok(())
+}
+
+fn load_theme(ed: &mut Editor, _: &Args) -> CmdResult {
+    if ed.themes.is_empty() {
+        return err("No themes are defined");
+    }
+    ed.open_theme_picker();
     Ok(())
 }
 

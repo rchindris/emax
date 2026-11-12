@@ -116,7 +116,7 @@ settings! {
     "font.ui_family", "Font", "Font: UI Family", Kind::Text { nullable: false, placeholder: "system-ui" },
         "Font of panels, tabs and the mode line. \"system-ui\" picks the platform's interface font.";
     "font.size", "Font", "Font: Size", Kind::Float { min: 4.0, max: 200.0 },
-        "Font size in pixels. Panels scale with it.";
+        "Font size in pixels. Panels scale with it unless font.ui_size is set in the settings file.";
     "font.line_height", "Font", "Font: Line Height", Kind::Float { min: 1.0, max: 4.0 },
         "Line height as a multiple of the font size.";
 
