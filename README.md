@@ -164,3 +164,7 @@ src/
 The engine does not depend on the GUI, so you can test it without opening a
 window. In `tests.rs`, buffer strings mark cursor positions with `|`, and
 several `|` mean several cursors.
+
+## License
+
+emax is released under the [MIT License](LICENSE).
