@@ -146,7 +146,9 @@ impl Editor {
         }
         self.others.retain(|s| s.id != id);
         let replacement = self.buf_id;
-        self.layout.replace_buffer(id, replacement);
+        if self.layout.replace_buffer(id, replacement) {
+            self.emit(Event::WindowConfigurationChanged);
+        }
         self.terminal_buffer_killed(id);
         self.emit(Event::BufferKilled { buf: id, name });
     }

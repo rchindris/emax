@@ -1,7 +1,9 @@
-//! GPUI view: renders the editor (virtualised lines, regions, multiple cursors,
-//! mode line, echo area, the buffer picker overlay, the swiper search panel)
-//! and translates platform
-//! key events into Emacs keys. Also runs the editor's ticks: when a PTY
+//! GPUI view: renders the editor (the current tab's windows, each with
+//! virtualised lines, regions, multiple cursors and its own mode line and
+//! scroll position; the tab bar; the echo area; the buffer picker overlay; the
+//! swiper search panel) and translates platform key events into Emacs keys.
+//! The window layout itself (geometry, which window is selected) comes from
+//! the engine; the view only draws it. Also runs the editor's ticks: when a PTY
 //! backend has output (it calls the waker from its own thread) and when the
 //! next hook timer is due.
 
@@ -18,13 +20,14 @@ use futures::StreamExt;
 
 use gpui::{
     AnyElement, App, ClipboardItem, Context, FocusHandle, Focusable, FontWeight, HighlightStyle, KeyDownEvent,
-    Keystroke, Pixels, Point, SharedString, StyledText, Task, UniformListScrollHandle, Window, div,
+    Keystroke, MouseButton, Pixels, Point, SharedString, StyledText, Task, UniformListScrollHandle, Window, div,
     point, prelude::*, px, rgba, uniform_list,
 };
 
 use emax::engine::picker::{Picker, PickerKind};
 use emax::engine::{Swiper, SwiperExit};
 use emax::engine::term::Palette;
+use emax::engine::window::{Rect, WindowId, compute_rects};
 use emax::engine::{Appearance, Args, BufView, Dispatcher, Editor, Key, Keymap, Keymaps, Outcome, Scroll, Theme, text};
 
 // ------------------------------------------------------------------ layout
@@ -49,8 +52,9 @@ pub struct EmaxView {
     picker_keys: Keymap,
     search_keys: Keymap,
     echo: Option<SharedString>,
-    /// One scroll position per buffer, so switching back restores the view.
-    scrolls: HashMap<u64, UniformListScrollHandle>,
+    /// One scroll position per window and buffer it has shown, so switching
+    /// a window back to a buffer restores its view there.
+    scrolls: HashMap<(WindowId, u64), UniformListScrollHandle>,
     focus: FocusHandle,
     /// Whether the search panel was on screen in the last rendered frame (the
     /// buffer list's last measured height includes or excludes it).
@@ -169,8 +173,68 @@ impl EmaxView {
         (SWIPER_ROWS as f32 + 1.0) * self.line_height() + 2.0
     }
 
-    fn scroll_for(&mut self, id: u64) -> UniformListScrollHandle {
-        self.scrolls.entry(id).or_default().clone()
+    /// The mode line's height (fixed, so window geometry is exact).
+    fn modeline_height(&self) -> f32 {
+        self.line_height() + f32::from(self.ui(8.0))
+    }
+
+    fn echo_height(&self) -> f32 {
+        self.line_height() + f32::from(self.ui(6.0))
+    }
+
+    /// The tab bar's height; it is only shown with more than one tab.
+    fn tab_bar_height(&self) -> f32 {
+        if self.ed.layout.tabs.len() > 1 { self.line_height() + f32::from(self.ui(12.0)) } else { 0.0 }
+    }
+
+    /// Window `win`'s scroll position in buffer `buf`. A new one starts at
+    /// the window's recorded first line (a fresh split, a restored session).
+    fn scroll_for(&mut self, win: WindowId, buf: u64) -> UniformListScrollHandle {
+        let lh = self.line_height();
+        let start = self.ed.layout.window(win).filter(|w| w.buffer == buf).map_or(0, |w| w.scroll_line);
+        self.scrolls
+            .entry((win, buf))
+            .or_insert_with(|| {
+                let h = UniformListScrollHandle::new();
+                h.0.borrow().base_handle.set_offset(point(px(0.0), px(-(start as f32) * lh)));
+                h
+            })
+            .clone()
+    }
+
+    /// The selected window's scroll position in the current buffer.
+    fn selected_scroll(&mut self) -> UniformListScrollHandle {
+        self.scroll_for(self.ed.layout.selected(), self.ed.buf_id)
+    }
+
+    /// Forget scroll positions of windows and buffers that are gone.
+    fn prune_scrolls(&mut self) {
+        let ed = &self.ed;
+        self.scrolls.retain(|(w, b), _| ed.layout.window(*w).is_some() && ed.find_buffer(*b).is_some());
+    }
+
+    /// Select window `win` (a mouse click) and handle what that queued.
+    fn click_window(&mut self, win: WindowId, cx: &mut Context<Self>) {
+        if self.ed.picker.is_some() || self.ed.swiper.is_some() || win == self.ed.layout.selected() {
+            return;
+        }
+        self.ed.select_window(win);
+        self.ed.run_hooks();
+        self.echo = self.ed.message.clone().map(Into::into);
+        self.schedule_timer(cx);
+        cx.notify();
+    }
+
+    /// Select tab `i` (a click in the tab bar).
+    fn click_tab(&mut self, i: usize, cx: &mut Context<Self>) {
+        if self.ed.picker.is_some() || self.ed.swiper.is_some() {
+            return;
+        }
+        self.ed.select_tab(i);
+        self.ed.run_hooks();
+        self.echo = self.ed.message.clone().map(Into::into);
+        self.schedule_timer(cx);
+        cx.notify();
     }
 
     fn on_key(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -236,7 +300,7 @@ impl EmaxView {
                 }
                 self.echo = self.ed.message.clone().map(Into::into);
                 if self.ed.swiper.is_some() && self.swiper_scroll.is_none() {
-                    self.swiper_scroll = Some(self.scroll_for(self.ed.buf_id).0.borrow().base_handle.offset());
+                    self.swiper_scroll = Some(self.selected_scroll().0.borrow().base_handle.offset());
                 }
                 self.apply_scroll();
     }
@@ -272,7 +336,7 @@ impl EmaxView {
             SwiperExit::Cancelled => {
                 self.echo = self.ed.message.take().map(Into::into);
                 if let Some(offset) = self.swiper_scroll.take() {
-                    self.scroll_for(self.ed.buf_id).0.borrow().base_handle.set_offset(offset);
+                    self.selected_scroll().0.borrow().base_handle.set_offset(offset);
                 }
             }
         }
@@ -286,7 +350,7 @@ impl EmaxView {
     /// when the search panel has opened or closed since.
     fn viewport(&mut self) -> (f32, f32, usize) {
         let (lh, panel_h) = (self.line_height(), self.swiper_panel_height());
-        let handle = self.scroll_for(self.ed.buf_id);
+        let handle = self.selected_scroll();
         let state = handle.0.borrow();
         let top = -f32::from(state.base_handle.offset().y);
         let mut h = state.last_item_size.map_or(30.0 * lh, |s| f32::from(s.item.height));
@@ -331,7 +395,7 @@ impl EmaxView {
             Scroll::Bottom => line_bottom - h,
             Scroll::Page(dir) => top + dir as f32 * rows.saturating_sub(2).max(1) as f32 * lh,
         };
-        let handle = self.scroll_for(self.ed.buf_id);
+        let handle = self.selected_scroll();
         let state = handle.0.borrow();
         let x = state.base_handle.offset().x;
         state.base_handle.set_offset(point(x, px(-new_top.clamp(0.0, max_top))));
@@ -731,12 +795,14 @@ enum CellKind {
 }
 
 /// Build the styled text for one line: tabs expanded; search matches (char
-/// columns, `current` for the selected one), region and cursor cells highlighted.
+/// columns, `current` for the selected one), region and cursor cells
+/// highlighted. In an unselected window (`active` false) the region is not
+/// shown and every cursor is drawn as a secondary one.
 fn render_line(
     v: &BufView,
     line: usize,
     tab_width: usize,
-    show_cursors: bool,
+    active: bool,
     matches: &[Range<usize>],
     current: bool,
     t: &Theme,
@@ -770,7 +836,7 @@ fn render_line(
             class[col] = hl;
         }
     }
-    if show_cursors {
+    if active {
         let line_end_incl = start + len + 1; // includes the newline position
         for c in v.cursors {
             if let Some(reg) = c.region() {
@@ -779,10 +845,10 @@ fn render_line(
                 }
             }
         }
-        for c in v.cursors {
-            if c.point >= start && c.point <= start + len && c.point - start < cells {
-                class[c.point - start] = if c.id == v.primary { CellKind::Cursor } else { CellKind::Cursor2 };
-            }
+    }
+    for c in v.cursors {
+        if c.point >= start && c.point <= start + len && c.point - start < cells {
+            class[c.point - start] = if active && c.id == v.primary { CellKind::Cursor } else { CellKind::Cursor2 };
         }
     }
 
@@ -822,60 +888,77 @@ fn render_line(
     StyledText::new(display).with_highlights(highlights)
 }
 
-impl Focusable for EmaxView {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
-    }
+/// What a window's mode line shows.
+struct ModeLine {
+    buf: u64,
+    name: String,
+    lighters: String,
+    total: usize,
+    line: usize,
+    col: usize,
+    cursors: usize,
+    region_len: usize,
+    modified: bool,
+    /// The picker is previewing another buffer in the selected window.
+    previewing: bool,
 }
 
-impl Render for EmaxView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Spacing utilities are in rems: scale them with the font as well.
-        window.set_rem_size(px(DESIGN_REM * self.ui_scale()));
-        let t0 = Instant::now();
-        if let Some(start) = self.key_started.take() {
-            self.last_latency_us = start.elapsed().as_micros();
+impl EmaxView {
+    /// Mode line facts for window `win`, or `None` if it has no buffer.
+    fn mode_line_info(&self, win: WindowId) -> Option<ModeLine> {
+        let v = self.ed.window_view(win)?;
+        let r = &v.buf.rope;
+        let p = v.cursors.iter().find(|c| c.id == v.primary).or(v.cursors.first()).map_or(0, |c| c.point).min(r.len_chars());
+        let line = r.char_to_line(p);
+        Some(ModeLine {
+            buf: v.id,
+            name: v.buf.name.clone(),
+            lighters: self.ed.mode_lighters(v.buf),
+            total: r.len_lines(),
+            line,
+            col: p - r.line_to_char(line),
+            cursors: v.cursors.len(),
+            region_len: v.cursors.iter().filter_map(|c| c.region()).map(|r| r.len()).sum(),
+            modified: v.buf.modified(),
+            previewing: win == self.ed.layout.selected() && v.id != self.ed.buf_id,
+        })
+    }
+
+    /// For each terminal buffer on screen, the window whose size it takes:
+    /// the selected window if it shows it, else the first one that does.
+    fn terminal_owners(&self, rects: &[(WindowId, Rect)]) -> HashMap<u64, WindowId> {
+        let mut owners = HashMap::new();
+        let sel = self.ed.layout.selected();
+        for win in std::iter::once(sel).chain(rects.iter().map(|r| r.0)) {
+            if let Some(b) = self.ed.layout.window(win).map(|w| w.buffer) {
+                if self.ed.is_terminal(b) {
+                    owners.entry(b).or_insert(win);
+                }
+            }
         }
+        owners
+    }
 
-        let (view_id, view_name, lighters, total, cur_line, cur_col, cursor_count, region_len, modified, previewing) = {
-            let v = self.ed.display_view();
-            let r = &v.buf.rope;
-            let p = v.cursors.iter().find(|c| c.id == v.primary).map_or(0, |c| c.point).min(r.len_chars());
-            let line = r.char_to_line(p);
-            let region_len: usize = v.cursors.iter().filter_map(|c| c.region()).map(|r| r.len()).sum();
-            (
-                v.id,
-                v.buf.name.clone(),
-                self.ed.mode_lighters(v.buf),
-                r.len_lines(),
-                line,
-                p - r.line_to_char(line),
-                v.cursors.len(),
-                region_len,
-                v.buf.modified(),
-                v.id != self.ed.buf_id,
-            )
-        };
-        let t = self.theme().clone();
-        let fonts = self.appearance.fonts.clone();
-        let lh = fonts.line_height;
-        let gutter_w = px(((total.to_string().len().max(3) + 2) as f32) * fonts.size * 0.62);
+    /// The text list of window `win` showing buffer `buf`.
+    fn render_text(&mut self, win: WindowId, m: &ModeLine, gutter_w: Pixels, cx: &mut Context<Self>) -> AnyElement {
+        let selected = win == self.ed.layout.selected();
+        let lh = self.line_height();
+        let cur_line = m.line;
         let rows_us = self.rows_us.clone();
-        self.panel_at_layout = self.ed.swiper.is_some();
-        let scroll = self.scroll_for(view_id);
-
-        let list = uniform_list(
-            "buffer",
-            total,
+        let scroll = self.scroll_for(win, m.buf);
+        uniform_list(
+            ("window", win.0 as usize),
+            m.total,
             cx.processor(move |this: &mut EmaxView, range: Range<usize>, _w, _cx| {
                 let started = Instant::now();
                 let t = this.appearance.themes.get(this.dark);
-                let v = this.ed.display_view();
-                let search = this.ed.swiper.as_ref();
+                let Some(v) = this.ed.window_view(win) else { return Vec::new() };
+                let search = this.ed.swiper.as_ref().filter(|_| selected);
                 let selected_match = search.and_then(|s| s.selected_line());
+                let tab_width = this.ed.tab_width_of(v.buf);
                 let rows: Vec<_> = range
                     .map(|ix| {
-                        let is_cur = ix == cur_line;
+                        let is_cur = selected && ix == cur_line;
                         div()
                             .id(ix)
                             .flex()
@@ -896,73 +979,222 @@ impl Render for EmaxView {
                             )
                             .child({
                                 let hl = search.map(|s| s.highlights(ix)).unwrap_or_default();
-                                render_line(&v, ix, this.ed.tab_width_of(v.buf), true, &hl, selected_match == Some(ix), t)
+                                render_line(&v, ix, tab_width, selected, &hl, selected_match == Some(ix), t)
                             })
                     })
                     .collect();
-                rows_us.set(started.elapsed().as_micros());
+                if selected {
+                    rows_us.set(started.elapsed().as_micros());
+                }
                 rows
             }),
         )
         .track_scroll(scroll)
-        .flex_1();
+        .flex_1()
+        .into_any_element()
+    }
 
-        let modeline = div()
+    /// A window's mode line: highlighted when the window is selected, with
+    /// the timing figures only there.
+    fn render_modeline(&self, m: &ModeLine, selected: bool, t0: Instant) -> AnyElement {
+        let t = self.theme();
+        let bg = match (selected, m.previewing) {
+            (true, true) => t.modeline_preview,
+            (true, false) => t.modeline,
+            (false, _) => t.background,
+        };
+        div()
+            .flex_none()
+            .h(px(self.modeline_height()))
             .flex()
+            .items_center()
             .gap_4()
             .px_3()
-            .py_1()
-            .bg(rgba(if previewing { t.modeline_preview } else { t.modeline }))
-            .text_color(rgba(t.foreground))
-            .child(div().text_color(rgba(t.accent)).child(if modified { "●" } else { "○" }))
-            .child(div().font_weight(FontWeight::BOLD).child(view_name))
-            .child(div().text_color(rgba(t.dim)).child(format!("({lighters})")))
-            .when(previewing, |d| d.child(div().text_color(rgba(t.accent)).child("preview")))
-            .child(format!("L{} C{}", cur_line + 1, cur_col))
-            .when(cursor_count > 1, |d| {
-                d.child(div().text_color(rgba(t.secondary_cursor)).child(format!("{cursor_count} cursors")))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .bg(rgba(bg))
+            .when(!selected, |d| d.border_t_1().border_color(rgba(t.panel_border)))
+            .text_color(rgba(if selected { t.foreground } else { t.dim }))
+            .child(div().text_color(rgba(if selected { t.accent } else { t.dim })).child(if m.modified { "●" } else { "○" }))
+            .child(div().font_weight(if selected { FontWeight::BOLD } else { FontWeight::NORMAL }).child(m.name.clone()))
+            .child(div().text_color(rgba(t.dim)).child(format!("({})", m.lighters)))
+            .when(m.previewing, |d| d.child(div().text_color(rgba(t.accent)).child("preview")))
+            .child(format!("L{} C{}", m.line + 1, m.col))
+            .when(m.cursors > 1, |d| d.child(div().text_color(rgba(t.secondary_cursor)).child(format!("{} cursors", m.cursors))))
+            .when(selected && m.region_len > 0, |d| {
+                d.child(div().text_color(rgba(t.cursor)).child(format!("{} selected", m.region_len)))
             })
-            .when(region_len > 0, |d| d.child(div().text_color(rgba(t.cursor)).child(format!("{region_len} selected"))))
-            .child(format!("{total} lines"))
-            .when(self.ed.buffer_count() > 1, |d| {
+            .child(format!("{} lines", m.total))
+            .when(selected && self.ed.buffer_count() > 1, |d| {
                 d.child(div().text_color(rgba(t.dim)).child(format!("{} buffers", self.ed.buffer_count())))
             })
             .child(div().flex_1())
-            .child(div().text_color(rgba(t.dim)).child(format!(
-                "key→view {} µs · rows {} µs · view {} µs",
-                self.last_latency_us,
-                self.rows_us.get(),
-                t0.elapsed().as_micros()
-            )));
+            .when(selected, |d| {
+                d.child(div().text_color(rgba(t.dim)).child(format!(
+                    "key→view {} µs · rows {} µs · view {} µs",
+                    self.last_latency_us,
+                    self.rows_us.get(),
+                    t0.elapsed().as_micros()
+                )))
+            })
+            .into_any_element()
+    }
+
+    /// Window `win` at `r` (pixels, within the windows' area of width
+    /// `area_w`): its text or terminal, the search panel if it is selected
+    /// and searching, and its mode line.
+    fn render_window(&mut self, win: WindowId, r: Rect, area_w: f32, owns_terminal: bool, t0: Instant, cx: &mut Context<Self>) -> AnyElement {
+        let Some(m) = self.mode_line_info(win) else { return div().into_any_element() };
+        let selected = win == self.ed.layout.selected();
+        let t = self.theme().clone();
+        let fonts = self.appearance.fonts.clone();
+        let lh = fonts.line_height;
+        let gutter_w = px(((m.total.to_string().len().max(3) + 2) as f32) * fonts.size * 0.62);
+        let right_edge = r.x + r.w < area_w - 0.5;
+
+        // Remember where the window is scrolled to (saved with the session).
+        let top = -f32::from(self.scroll_for(win, m.buf).0.borrow().base_handle.offset().y);
+        self.ed.set_window_scroll(win, (top.max(0.0) / lh).floor() as usize);
+
+        // A terminal buffer shows its screen instead of the text list.
+        let palette = Palette::from_theme(&t);
+        let body = match self.ed.terminal_snapshot(m.buf, &palette) {
+            Some(snap) => {
+                let snap = if owns_terminal {
+                    let panel = if selected && self.ed.swiper.is_some() { self.swiper_panel_height() } else { 0.0 };
+                    let border = if right_edge { 1.0 } else { 0.0 };
+                    let (cols, rows) = term_view::grid_size(
+                        r.w - border,
+                        r.h - self.modeline_height() - panel,
+                        term_view::cell_width(fonts.size),
+                        lh,
+                    );
+                    self.ed.resize_terminal(m.buf, cols, rows);
+                    self.ed.terminal_snapshot(m.buf, &palette)
+                } else {
+                    Some(snap)
+                };
+                div().flex_1().min_h_0().overflow_hidden().children(snap.map(|s| term_view::render_terminal(&s, lh))).into_any_element()
+            }
+            None => self.render_text(win, &m, gutter_w, cx),
+        };
+        let search = if selected { self.ed.swiper.as_ref().map(|s| self.render_swiper(s, gutter_w, cx)) } else { None };
+        let modeline = self.render_modeline(&m, selected, t0);
+
+        div()
+            .id(("window", win.0 as usize))
+            .absolute()
+            .left(px(r.x))
+            .top(px(r.y))
+            .w(px(r.w))
+            .h(px(r.h))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .when(right_edge, |d| d.border_r_1().border_color(rgba(t.panel_border)))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| this.click_window(win, cx)))
+            .child(body)
+            .children(search)
+            .child(modeline)
+            .into_any_element()
+    }
+
+    /// The tab bar (only with more than one tab): each tab's number and
+    /// name; the current one stands out; clicking one selects it.
+    fn render_tab_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.ed.layout.tabs.len() < 2 {
+            return None;
+        }
+        let t = self.theme();
+        let current = self.ed.layout.current_tab;
+        let tabs = self.ed.tab_names().into_iter().enumerate().map(|(i, name)| {
+            let cur = i == current;
+            div()
+                .id(("tab", i))
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .h_full()
+                .rounded_t_md()
+                .cursor_pointer()
+                .when(cur, |d| d.bg(rgba(t.background)).text_color(rgba(t.emphasis)).font_weight(FontWeight::SEMIBOLD))
+                .when(!cur, |d| d.text_color(rgba(t.dim)).hover(|s| s.bg(rgba(t.row_hover))))
+                .on_click(cx.listener(move |this, _, _, cx| this.click_tab(i, cx)))
+                .child(div().text_color(rgba(t.dim)).child(format!("{}", i + 1)))
+                .child(name)
+        });
+        Some(
+            div()
+                .flex_none()
+                .h(px(self.tab_bar_height()))
+                .flex()
+                .items_end()
+                .gap_1()
+                .px_2()
+                .pt_1()
+                .bg(rgba(t.panel))
+                .border_b_1()
+                .border_color(rgba(t.panel_border))
+                .font_family(self.appearance.fonts.ui_family.clone())
+                .text_size(self.ui(12.5))
+                .children(tabs)
+                .into_any_element(),
+        )
+    }
+}
+
+impl Focusable for EmaxView {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl Render for EmaxView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Spacing utilities are in rems: scale them with the font as well.
+        window.set_rem_size(px(DESIGN_REM * self.ui_scale()));
+        let t0 = Instant::now();
+        if let Some(start) = self.key_started.take() {
+            self.last_latency_us = start.elapsed().as_micros();
+        }
+        let t = self.theme().clone();
+        let fonts = self.appearance.fonts.clone();
+        let lh = fonts.line_height;
+        self.panel_at_layout = self.ed.swiper.is_some();
+
+        // The windows' area: everything but the tab bar and the echo area.
+        // The engine works in cells, the view in pixels; both lay out the same tree.
+        let size = window.viewport_size();
+        let (echo_h, tab_bar_h) = (self.echo_height(), self.tab_bar_height());
+        let area_w = f32::from(size.width).max(1.0);
+        let area_h = (f32::from(size.height) - echo_h - tab_bar_h).max(lh);
+        self.ed.layout.set_frame_size(area_w / term_view::cell_width(fonts.size), area_h / lh);
+        let rects = compute_rects(&self.ed.layout.tab().root, Rect { x: 0.0, y: 0.0, w: area_w, h: area_h });
+
+        self.prune_scrolls();
+        let owners = self.terminal_owners(&rects);
+        let windows: Vec<AnyElement> = rects
+            .iter()
+            .map(|&(win, r)| {
+                let buf = self.ed.layout.window(win).map(|w| w.buffer);
+                let owns = buf.is_some_and(|b| owners.get(&b) == Some(&win));
+                self.render_window(win, r, area_w, owns, t0, cx)
+            })
+            .collect();
 
         let echo = div()
-            .h(px(lh) + self.ui(6.0))
+            .flex_none()
+            .h(px(echo_h))
             .px_3()
             .flex()
             .items_center()
+            .overflow_hidden()
+            .whitespace_nowrap()
             .text_color(rgba(t.foreground))
             .child(self.echo.clone().unwrap_or_default());
-
-        // A terminal buffer shows its screen instead of the text list.
-        let body = match self.ed.terminal_snapshot(view_id, &Palette::from_theme(&t)) {
-            Some(_) => {
-                let chrome = 2.0 * lh + f32::from(self.ui(6.0)) + f32::from(self.ui(8.0));
-                let size = window.viewport_size();
-                let (cols, rows) = term_view::grid_size(
-                    f32::from(size.width),
-                    f32::from(size.height) - chrome,
-                    term_view::cell_width(fonts.size),
-                    lh,
-                );
-                self.ed.resize_terminal(view_id, cols, rows);
-                let snap = self.ed.terminal_snapshot(view_id, &Palette::from_theme(&t));
-                div().flex_1().min_h_0().children(snap.map(|s| term_view::render_terminal(&s, lh))).into_any_element()
-            }
-            None => list.into_any_element(),
-        };
-
+        let tab_bar = self.render_tab_bar(cx);
         let picker = self.ed.picker.as_ref().map(|p| self.render_picker(p, cx));
-        let search = self.ed.swiper.as_ref().map(|s| self.render_swiper(s, gutter_w, cx));
 
         div()
             .track_focus(&self.focus)
@@ -976,9 +1208,8 @@ impl Render for EmaxView {
             .font_family(fonts.family)
             .text_size(px(fonts.size))
             .line_height(px(lh))
-            .child(body)
-            .children(search)
-            .child(modeline)
+            .children(tab_bar)
+            .child(div().relative().flex_none().w_full().h(px(area_h)).children(windows))
             .child(echo)
             .children(picker)
     }
