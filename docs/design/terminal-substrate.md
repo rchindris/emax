@@ -1,11 +1,9 @@
 # Terminal substrate: hooks, windows, terminals, PTYs, sessions
 
-Status: contract for the parallel build on `feat/terminal-substrate`.
-Everything named here already exists in the tree as a compiling skeleton
-(types, traits, signatures, registered commands, config, key bindings); each
-builder fills in the bodies it owns. If you need to change a shared signature,
-keep the change minimal and list it in your report so the integrator can
-reconcile.
+Status: implemented and integrated on `feat/terminal-substrate`. This was
+the contract for the parallel build; §10 records where the final API differs
+from or extends the original contract, and is authoritative where they
+disagree.
 
 The long-term goal is an agent multiplexer written as a Steel (Scheme) plugin
 on top of this. So every registry stays **data-driven and addressable by
@@ -496,3 +494,94 @@ Parsed into `Config.terminal: TerminalConfig` (with `keymap`) and
 
 C-x 2/3/0/1/o/+/^/}/{ (windows), C-x w <arrows> (windmove), C-x t 2/0/o/S-o/r
 and C-TAB / C-S-TAB (tabs). Terminal keys: §5.
+
+## 10. Final API: changes and additions after integration
+
+### Hooks
+- `Editor::exit()`: runs the `kill-emacs` hooks once if
+  `save-buffers-kill-terminal` has not already (sets `quit_requested`). The
+  view calls it when the window closes and when the app quits, so the
+  session is saved however emax ends.
+
+### Windows (`src/engine/window/` = `mod.rs`, `tree.rs`, `ops.rs`, `tests.rs`)
+- Public paths unchanged: `window::{Layout, Node, Window, Tab, Rect, WindowId,
+  SplitDir, compute_rects, COMMANDS}`; also `Direction`, `MIN_ROWS = 4`
+  (includes the mode line), `MIN_COLS = 10`, `ResizeError`, `window_rect`.
+- `Layout`: `set_frame_size(cols, rows)` (the windows' area, without tab bar
+  and echo area), `frame_size`, `frame_rect`, `window_rects`, `tab_of`,
+  `window_order`, `check()` (invariants; used by tests and session restore).
+  `replace_buffer` returns whether any window changed.
+- Editor: `select_window`, `split_window`, `delete_window`,
+  `delete_other_windows`, `other_window`, `balance_windows`,
+  `resize_window`, `windmove`, `window_view`, `window_point`,
+  `set_window_scroll`, `buffer_name(id) -> Option<&str>`, and tab helpers
+  `select_tab`, `new_tab`, `close_tab`, `next_tab`, `rename_tab`, `tab_name`,
+  `tab_names`. Exactly one `WindowConfigurationChanged` per change.
+- Undo/redo keep other windows' points in place: `Buffer::undo/redo` return
+  `(cursors, Vec<buffer::Change>)` and the commands pass each change to
+  `Layout::adjust_for_edit`.
+- `C-x t r` without `Args.text` clears the explicit tab name.
+- UI: scroll handles keyed by `(WindowId, BufferId)`; the search panel is
+  docked inside the selected window.
+
+### Terminal (`src/engine/term/`)
+- Additions: `Palette::{xterm, indexed}`, `Terminal::history_len`,
+  `Snapshot::{row_text, row_runs}` + `Run`, `Editor::shell_spec`,
+  `term::buffer::{POLL_BUDGET_BYTES (4 MiB), TERM_BUFFER_NAME}`.
+- Synchronized updates (mode 2026) are disabled in the parser: a headless
+  terminal has nothing to redraw it when vte's timeout passes.
+- `encode_paste` turns line breaks into `\r` and strips an embedded
+  `ESC[201~` in bracketed mode. `term-scroll-up/down` scroll a page, or N
+  lines with a prefix argument.
+- `TermState.spec.size` follows resizes (saved in the session file).
+- Exit message: `Process <name> exited`, `... exited with code N` or
+  `... exited (killed by signal S)`.
+- Copy-mode entry/exit puts other windows showing that terminal buffer at
+  its start (the text is replaced).
+- View (`src/ui/term_view.rs`): `render_terminal(&Snapshot, cell_w, line_h)`
+  (cell width is now explicit), `measure_cell_width(window, family, size)`
+  (the real advance; measured every render and also used for
+  `Layout::set_frame_size`), `cell_width(size)` (estimate before the first
+  render), `grid_size`.
+
+### PTY (`src/engine/pty/local.rs`, `sys.rs`)
+- `LocalBackend::{new, with_kill_grace}`, inspection helpers `pid`, `queued`,
+  `bytes_read`, `live_threads`, constants `EVENT_QUEUE = 256`,
+  `DEFAULT_KILL_GRACE = 1 s`, `local::resolved_cwd`.
+- Exit statuses are decoded with our own `waitpid` (stable signal names,
+  `code = 1` for signal deaths). `kill` sends SIGHUP + SIGCONT to the process
+  group, SIGKILL after the grace period.
+- Output queued before `detach` is still delivered; output read while
+  detached is dropped; an exit while detached is reported on `attach`.
+
+### Session (`src/engine/session/`)
+- `DaemonBackend::connect_or_start(socket, replay_bytes, idle_exit, waker)`
+  and `connect_or_start_with(program, socket, replay_bytes, idle_exit, waker)`;
+  also `daemon_pid`, `is_connected`, `shutdown`, `set_reply_timeout`.
+- Config: `terminal.daemon_idle_exit` (seconds, default 60, 0 = never) for
+  daemons the editor starts. CLI: `emax --pty-daemon [--socket PATH]
+  [--replay-bytes N] [--idle-exit SECS] [--foreground]`; exit codes
+  `exit_code::{OK 0, ERROR 1, USAGE 2, IN_USE 3}`. The socket path is made
+  absolute before detaching.
+- Next to the socket: `<sock>.lock` (flock: one daemon per socket) and
+  `<sock>.log` (a detached daemon's output).
+- Version mismatch: the daemon sends its own `Hello`, then closes.
+- Several clients on one session get broadcast output; the last resize
+  wins; killing a session sends `Exited { signal: "Killed" }` to the others.
+  Flow control: a client with more than `HIGH_WATER` (8 MiB) queued pauses
+  reading from the backend.
+- `session::validate`, `Editor::restore_session_file(path) -> io::Result<bool>`
+  (a bad file is renamed to `*.json.corrupt`), `Editor::save_session_on_quit`
+  (hook `SAVE_HOOK = "session-save"`).
+- `Editor.waker` forwards to whatever `set_waker` installed last, so a
+  backend created during restore (before the view exists) still wakes it.
+- Restore and save happen only when emax starts with no files, so
+  `emax file` neither restores nor overwrites the saved workspace.
+
+### Tests across subsystems
+`src/engine/e2e_tests.rs`: `/bin/sh` in a terminal buffer through
+`LocalBackend`, driven key by key; paste and interrupt; two terminals in
+split windows sized by their windows (`stty size`); a session saved, then
+restored into a new editor that reattaches through an in-process daemon
+running real processes (replay, then live); hook event order.
+`tests/daemon.rs` runs the real binary.
