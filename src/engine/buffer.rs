@@ -10,6 +10,15 @@ use ropey::Rope;
 use super::cursor::Cursor;
 use super::modes::BufferModes;
 
+/// A change undo or redo made to the text: chars `start..end` were replaced
+/// by `inserted` chars (the shape `Cursor::adjust` takes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Change {
+    pub start: usize,
+    pub end: usize,
+    pub inserted: usize,
+}
+
 /// A primitive change: at `pos`, `old` was replaced by `new`.
 #[derive(Clone, Debug)]
 pub struct Edit {
@@ -169,7 +178,7 @@ impl Buffer {
         if g.edits.is_empty() {
             return None;
         }
-        self.apply_inverse(&g.edits);
+        let _ = self.apply_inverse(&g.edits);
         Some(g.before)
     }
 
@@ -180,37 +189,46 @@ impl Buffer {
         }
     }
 
-    fn apply_inverse(&mut self, edits: &[Edit]) {
+    /// Undo `edits`; returns the changes made, in order.
+    fn apply_inverse(&mut self, edits: &[Edit]) -> Vec<Change> {
+        let mut changes = Vec::with_capacity(edits.len());
         for e in edits.iter().rev() {
             let n = e.new.chars().count();
             self.rope.remove(e.pos..e.pos + n);
             self.rope.insert(e.pos, &e.old);
+            changes.push(Change { start: e.pos, end: e.pos + n, inserted: e.old.chars().count() });
         }
+        changes
     }
 
-    fn apply_forward(&mut self, edits: &[Edit]) {
+    /// Redo `edits`; returns the changes made, in order.
+    fn apply_forward(&mut self, edits: &[Edit]) -> Vec<Change> {
+        let mut changes = Vec::with_capacity(edits.len());
         for e in edits {
             let n = e.old.chars().count();
             self.rope.remove(e.pos..e.pos + n);
             self.rope.insert(e.pos, &e.new);
+            changes.push(Change { start: e.pos, end: e.pos + n, inserted: e.new.chars().count() });
         }
+        changes
     }
 
-    /// Undo one group; returns the cursors to restore.
-    pub fn undo(&mut self) -> Option<Vec<Cursor>> {
+    /// Undo one group; returns the cursors to restore and the changes made
+    /// (so other windows showing the buffer can follow them).
+    pub fn undo(&mut self) -> Option<(Vec<Cursor>, Vec<Change>)> {
         let g = self.undo.pop()?;
-        self.apply_inverse(&g.edits);
+        let changes = self.apply_inverse(&g.edits);
         let cursors = g.before.clone();
         self.redo.push(g);
-        Some(cursors)
+        Some((cursors, changes))
     }
 
-    pub fn redo(&mut self) -> Option<Vec<Cursor>> {
+    pub fn redo(&mut self) -> Option<(Vec<Cursor>, Vec<Change>)> {
         let mut g = self.redo.pop()?;
-        self.apply_forward(&g.edits);
+        let changes = self.apply_forward(&g.edits);
         let cursors = g.after.clone();
         g.amalgamate = false;
         self.undo.push(g);
-        Some(cursors)
+        Some((cursors, changes))
     }
 }

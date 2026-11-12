@@ -624,6 +624,34 @@ fn editing_in_one_window_moves_the_other_windows_point() {
 }
 
 #[test]
+fn undo_and_redo_move_the_other_windows_point_too() {
+    let mut e = editor("abc\ndef\nghi");
+    e.goto(8); // "ghi"
+    e.keys("C-x 2");
+    let other = e.ed.layout.window_order()[1];
+    e.goto(0);
+    e.ed.execute("self-insert-command", Args { text: Some("XYZ".into()), ..Default::default() });
+    assert_eq!(e.ed.window_point(other), Some(11));
+    e.keys("C-/");
+    assert_eq!(e.ed.rope().to_string(), "abc\ndef\nghi");
+    assert_eq!(e.ed.window_point(other), Some(8), "undo took the insertion back: still on ghi");
+    e.keys("C-?");
+    assert_eq!(e.ed.window_point(other), Some(11), "redo put it back");
+    // A deletion around the other point, undone, leaves it where the text went.
+    e.goto(7); // "def"
+    e.keys("C-k C-k");
+    assert_eq!(e.ed.rope().to_string(), "XYZabc\nghi");
+    assert_eq!(e.ed.window_point(other), Some(7));
+    // Undo re-inserts "def\n" at the other point, which stays before it
+    // (like an Emacs marker). Each C-k is its own undo group.
+    e.keys("C-/ C-/");
+    assert_eq!(e.ed.rope().to_string(), "XYZabc\ndef\nghi");
+    assert_eq!(e.ed.window_point(other), Some(7));
+    e.keys("C-x o");
+    assert_eq!(e.point(), 7);
+}
+
+#[test]
 fn windows_on_different_buffers_switch_the_current_buffer() {
     let mut e = editor("first");
     let b = e.ed.add_buffer(Buffer::from_str("b", "second buffer"));

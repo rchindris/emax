@@ -1294,9 +1294,18 @@ fn restore(ed: &mut Editor, cursors: Vec<Cursor>) {
     }
 }
 
+/// Keep the points of other windows showing this buffer in place across
+/// the text undo or redo changed.
+fn follow_changes(ed: &mut Editor, changes: &[super::buffer::Change]) {
+    for c in changes {
+        ed.layout.adjust_for_edit(ed.buf_id, c.start, c.end, c.inserted);
+    }
+}
+
 fn undo(ed: &mut Editor, a: &Args) -> CmdResult {
     for _ in 0..a.n().max(1) {
-        let Some(cursors) = ed.buf.undo() else { return err("No further undo information") };
+        let Some((cursors, changes)) = ed.buf.undo() else { return err("No further undo information") };
+        follow_changes(ed, &changes);
         restore(ed, cursors);
     }
     ed.message = Some("Undo".into());
@@ -1305,7 +1314,8 @@ fn undo(ed: &mut Editor, a: &Args) -> CmdResult {
 
 fn undo_redo(ed: &mut Editor, a: &Args) -> CmdResult {
     for _ in 0..a.n().max(1) {
-        let Some(cursors) = ed.buf.redo() else { return err("No further redo information") };
+        let Some((cursors, changes)) = ed.buf.redo() else { return err("No further redo information") };
+        follow_changes(ed, &changes);
         restore(ed, cursors);
     }
     ed.message = Some("Redo".into());
