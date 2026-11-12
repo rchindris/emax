@@ -882,3 +882,62 @@ fn random_bytes_flood_never_panics() {
     t.snapshot(&P());
     t.text();
 }
+
+// -------------------------------------------------------------- draw runs
+
+#[test]
+fn row_runs_split_on_style_and_wide_chars() {
+    let p = P();
+    let t = fed(12, 1, "ab\x1b[31mcd\x1b[1me\x1b[0m日f😀");
+    let runs = snap(&t).row_runs(0);
+    let summary: Vec<(usize, usize, &str)> = runs.iter().map(|r| (r.col, r.width, r.text.as_str())).collect();
+    assert_eq!(summary, [(0, 2, "ab"), (2, 2, "cd"), (4, 1, "e"), (5, 2, "日"), (7, 1, "f"), (8, 2, "😀"), (10, 2, "  ")]);
+    assert_eq!(runs[1].fg, p.ansi[1]);
+    assert!(runs[2].flags.bold);
+    assert_eq!(runs[2].fg, p.ansi[9]);
+    assert!(!runs[3].flags.wide && !runs[3].flags.wide_spacer);
+    assert!(runs[6].is_blank(p.background));
+    assert!(!runs[0].is_blank(p.background));
+}
+
+#[test]
+fn row_runs_cover_every_column_once() {
+    let mut rng = Rng(7);
+    for _ in 0..200 {
+        let cols = 2 + rng.below(30) as u16;
+        let mut t = term(cols, 3);
+        for _ in 0..rng.below(40) {
+            let piece = match rng.below(6) {
+                0 => "日".to_string(),
+                1 => "😀".to_string(),
+                2 => format!("\x1b[3{}m", rng.below(8)),
+                3 => "e\u{301}".to_string(),
+                4 => "\x1b[7m".to_string(),
+                _ => "x".to_string(),
+            };
+            t.feed(piece.as_bytes());
+        }
+        let s = snap(&t);
+        for row in 0..s.rows {
+            let mut next = 0;
+            for r in s.row_runs(row) {
+                assert_eq!(r.col, next, "runs are contiguous");
+                assert!(r.width >= 1);
+                next += r.width;
+            }
+            assert_eq!(next, s.cols, "runs cover the row");
+        }
+    }
+}
+
+#[test]
+fn row_runs_keep_combining_chars_and_blank_leading_spacers() {
+    let t = fed(5, 2, "e\u{301}cde日");
+    let s = snap(&t);
+    let runs = s.row_runs(0);
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].text, "e\u{301}cde ");
+    assert_eq!(runs[0].width, 5);
+    assert_eq!(s.row_runs(1)[0].text, "日");
+    assert!(s.row_runs(9).is_empty());
+}

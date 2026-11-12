@@ -158,7 +158,64 @@ pub struct Snapshot {
     pub background: Rgba,
 }
 
+/// Consecutive cells of a row drawn with one style: what a renderer places
+/// at column `col`, `width` cells wide.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Run {
+    pub col: usize,
+    /// Width in cells (a wide character is a run of its own, 2 cells wide,
+    /// so a renderer can place it exactly whatever the font's glyph width).
+    pub width: usize,
+    /// The characters, combining characters included.
+    pub text: String,
+    pub fg: Rgba,
+    pub bg: Rgba,
+    /// Style flags (`wide`/`wide_spacer` cleared: `width` says it).
+    pub flags: CellFlags,
+}
+
+impl Run {
+    /// Nothing to draw: spaces on the terminal's background.
+    pub fn is_blank(&self, background: Rgba) -> bool {
+        self.bg == background && self.text.chars().all(|c| c == ' ') && !self.flags.underline && !self.flags.strikethrough
+    }
+}
+
 impl Snapshot {
+    /// Row `row` split into runs of same-styled cells, left to right,
+    /// covering every column exactly once.
+    pub fn row_runs(&self, row: usize) -> Vec<Run> {
+        let Some(cells) = self.lines.get(row) else { return Vec::new() };
+        let mut runs: Vec<Run> = Vec::new();
+        // Whether the last run is a wide character (nothing joins it).
+        let mut last_wide = false;
+        for (col, c) in cells.iter().enumerate() {
+            let after_wide = col > 0 && cells[col - 1].flags.wide;
+            if c.flags.wide_spacer && after_wide {
+                continue; // covered by the wide character's run
+            }
+            let flags = CellFlags { wide: false, wide_spacer: false, ..c.flags };
+            // A spacer that isn't behind a wide character pads a line whose
+            // wide character didn't fit: it draws as a blank.
+            let ch = if c.flags.wide_spacer { ' ' } else { c.ch };
+            let wide = c.flags.wide && col + 1 < cells.len();
+            match runs.last_mut() {
+                Some(r) if !wide && !last_wide && r.fg == c.fg && r.bg == c.bg && r.flags == flags => {
+                    r.width += 1;
+                    r.text.push(ch);
+                    r.text.extend(&c.zerowidth);
+                }
+                _ => {
+                    let mut text = String::from(ch);
+                    text.extend(&c.zerowidth);
+                    runs.push(Run { col, width: if wide { 2 } else { 1 }, text, fg: c.fg, bg: c.bg, flags });
+                }
+            }
+            last_wide = wide;
+        }
+        runs
+    }
+
     /// Row `row` as text (wide-character spacers skipped, combining
     /// characters kept, trailing blanks trimmed). For tests and debugging.
     pub fn row_text(&self, row: usize) -> String {
