@@ -21,6 +21,11 @@ use emax::engine::{Appearance, BufView, Dispatcher, Editor, Key, Keymap, Keymaps
 
 // ------------------------------------------------------------------ layout
 
+/// The font size the panel sizes below are written for. Panels scale with
+/// `font.size` relative to this, so they look the same at any size.
+const DESIGN_FONT_SIZE: f32 = 14.0;
+/// GPUI's default rem size; spacing utilities (`px_3`, `gap_2`…) are in rems.
+const DESIGN_REM: f32 = 16.0;
 /// Lines longer than this are truncated on screen (prototype limitation).
 const MAX_RENDER_COLS: usize = 2000;
 const PICKER_ROWS: usize = 12;
@@ -85,6 +90,16 @@ impl EmaxView {
 
     fn line_height(&self) -> f32 {
         self.appearance.fonts.line_height
+    }
+
+    /// How much larger than the design size the UI is drawn.
+    fn ui_scale(&self) -> f32 {
+        self.appearance.fonts.size / DESIGN_FONT_SIZE
+    }
+
+    /// A size in the panels, given at the design font size.
+    fn ui(&self, design_px: f32) -> Pixels {
+        px(design_px * self.ui_scale())
     }
 
     /// Height of the search panel: the query line, the rows, and two 1px borders.
@@ -258,7 +273,7 @@ impl EmaxView {
                     .items_center()
                     .gap_3()
                     .px_3()
-                    .h(px(32.0))
+                    .h(self.ui(32.0))
                     .rounded_md()
                     .cursor_pointer()
                     .when(selected, |d| d.bg(rgba(t.row_selected)))
@@ -270,12 +285,12 @@ impl EmaxView {
                     }))
                     .child(
                         div()
-                            .w(px(3.0))
-                            .h(px(16.0))
+                            .w(self.ui(3.0))
+                            .h(self.ui(16.0))
                             .rounded_sm()
                             .when(selected, |d| d.bg(rgba(t.cursor))),
                     )
-                    .child(div().w(px(10.0)).text_color(rgba(t.secondary_cursor)).child(if c.modified { "●" } else { "" }))
+                    .child(div().w(self.ui(10.0)).text_color(rgba(t.secondary_cursor)).child(if c.modified { "●" } else { "" }))
                     .child(
                         div()
                             .flex_none()
@@ -289,7 +304,7 @@ impl EmaxView {
                                 .px_1p5()
                                 .rounded_sm()
                                 .bg(rgba(t.badge))
-                                .text_size(px(11.0))
+                                .text_size(self.ui(11.0))
                                 .text_color(rgba(t.dim))
                                 .child("current"),
                         )
@@ -301,11 +316,11 @@ impl EmaxView {
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
-                            .text_size(px(12.5))
+                            .text_size(self.ui(12.5))
                             .text_color(rgba(t.dim))
                             .child(c.detail.clone()),
                     )
-                    .child(div().flex_none().text_size(px(12.0)).text_color(rgba(t.dim)).child(c.annotation.clone()))
+                    .child(div().flex_none().text_size(self.ui(12.0)).text_color(rgba(t.dim)).child(c.annotation.clone()))
             })
             .collect();
 
@@ -330,7 +345,7 @@ impl EmaxView {
         let panel = div()
             .id("picker")
             .occlude()
-            .w(px(720.0))
+            .w(self.ui(720.0))
             .max_w_full()
             .flex()
             .flex_col()
@@ -341,7 +356,7 @@ impl EmaxView {
             .shadow_2xl()
             .overflow_hidden()
             .font_family(self.appearance.fonts.ui_family.clone())
-            .text_size(px(14.0))
+            .text_size(self.ui(14.0))
             .child(
                 div()
                     .flex()
@@ -349,7 +364,7 @@ impl EmaxView {
                     .gap_2()
                     .px_4()
                     .pt_3()
-                    .text_size(px(11.5))
+                    .text_size(self.ui(11.5))
                     .text_color(rgba(t.dim))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(p.prompt.to_uppercase()))
                     .child(div().flex_1())
@@ -364,9 +379,9 @@ impl EmaxView {
                     .py_2p5()
                     .border_b_1()
                     .border_color(rgba(t.panel_border))
-                    .text_size(px(16.0))
+                    .text_size(self.ui(16.0))
                     .child(div().text_color(rgba(t.accent)).child("❯"))
-                    .child(query_with_caret(&query, px(18.0), t))
+                    .child(query_with_caret(&query, self.ui(18.0), t))
                     .when(query.is_empty(), |d| {
                         d.child(div().text_color(rgba(t.dim)).child("Type to filter buffers…"))
                     }),
@@ -395,7 +410,7 @@ impl EmaxView {
                     .py_2()
                     .border_t_1()
                     .border_color(rgba(t.panel_border))
-                    .text_size(px(12.0))
+                    .text_size(self.ui(12.0))
                     .text_color(rgba(t.dim))
                     .child(div().flex_1().child(footer_hint))
                     .when_some(p.message.clone(), |d, m| d.child(div().text_color(rgba(t.secondary_cursor)).child(m))),
@@ -408,7 +423,7 @@ impl EmaxView {
             .flex()
             .justify_center()
             .items_start()
-            .pt(px(90.0))
+            .pt(self.ui(90.0))
             .px_4()
             .child(panel)
             .into_any_element()
@@ -448,10 +463,10 @@ impl EmaxView {
                         this.after_swiper(exit);
                         cx.notify();
                     }))
-                    .child(div().w(px(3.0)).flex_none().when(selected, |d| d.bg(rgba(t.cursor))))
+                    .child(div().w(self.ui(3.0)).flex_none().when(selected, |d| d.bg(rgba(t.cursor))))
                     .child(
                         div()
-                            .w(gutter_w - px(3.0))
+                            .w(gutter_w - self.ui(3.0))
                             .flex_none()
                             .pr_3()
                             .flex()
@@ -495,13 +510,13 @@ impl EmaxView {
             .child(div().text_color(rgba(t.accent)).font_weight(FontWeight::SEMIBOLD).child(if s.backward { "Swiper ↑" } else { "Swiper" }))
             .child(div().text_color(rgba(t.dim)).child(count))
             .child(div().text_color(rgba(t.accent)).child("❯"))
-            .child(query_with_caret(&query, px(16.0), t))
+            .child(query_with_caret(&query, self.ui(16.0).min(px(lh)), t))
             .when(query.is_empty(), |d| d.child(div().text_color(rgba(t.dim)).child("Search…  (space separates terms)")))
             .child(div().flex_1())
             .child(
                 div()
                     .font_family(self.appearance.fonts.ui_family.clone())
-                    .text_size(px(12.0))
+                    .text_size(self.ui(12.0))
                     .text_color(rgba(t.dim))
                     .child(hints(
                         &self.search_keys,
@@ -724,7 +739,9 @@ impl Focusable for EmaxView {
 }
 
 impl Render for EmaxView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Spacing utilities are in rems: scale them with the font as well.
+        window.set_rem_size(px(DESIGN_REM * self.ui_scale()));
         let t0 = Instant::now();
         if let Some(start) = self.key_started.take() {
             self.last_latency_us = start.elapsed().as_micros();
@@ -827,7 +844,7 @@ impl Render for EmaxView {
             )));
 
         let echo = div()
-            .h(px(lh + 6.0))
+            .h(px(lh) + self.ui(6.0))
             .px_3()
             .flex()
             .items_center()

@@ -100,7 +100,7 @@ same keys. Setting an entry to `null` removes a default binding:
 | `editor.tab_width` | Display width of a tab and the indent step (default 4) |
 | `font.family` | Font for buffer text (default `"monospace"`: Menlo on macOS, Consolas on Windows, DejaVu Sans Mono on Linux) |
 | `font.ui_family` | Font for the buffer picker and panel hints (default `"system-ui"`, the platform's UI font) |
-| `font.size` | Buffer text size in pixels (default 14) |
+| `font.size` | Text size in pixels (default 14). The mode line, echo area, buffer picker and search panel scale with it |
 | `font.line_height` | Line height as a multiple of the size (default 1.5) |
 | `theme` | The theme to use (default `"emax-dark"`), or `{ "light": …, "dark": … }` to follow the system appearance |
 | `themes` | Theme definitions; see [Themes](#themes) |
