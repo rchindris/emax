@@ -76,6 +76,8 @@ fn main() {
     }
     ed.set_modes(Arc::new(config.modes));
     ed.set_terminal_config(Arc::new(config.terminal));
+    let session_file = session::state_dir(config.session.state_dir.as_deref()).map(|d| session::session_file_path(&d));
+    let restore = config.session.restore_session;
     ed.session_config = config.session;
     let lines: usize = ed.rope().len_lines();
     ed.message = Some(match config.warnings.as_slice() {
@@ -90,6 +92,25 @@ fn main() {
         [w] => format!("Config problem (entry skipped): {w}"),
         [w, rest @ ..] => format!("Config problem (entry skipped): {w} — and {} more, see stderr", rest.len()),
     });
+    // The last session comes back when no files were named, and is saved on
+    // quit. A quick `emax file` neither restores nor overwrites it. Terminal
+    // processes live on in the session daemon either way.
+    if let (Some(file), true, true) = (session_file, restore, paths.is_empty()) {
+        let startup = ed.message.take();
+        match ed.restore_session_file(&file) {
+            Ok(true) => {}
+            Ok(false) => ed.message = startup.clone(),
+            Err(e) => {
+                eprintln!("emax: session: {e}");
+                ed.message = Some(format!("Session not restored: {e}"));
+            }
+        }
+        // Config problems matter more than the restore summary.
+        if !config.warnings.is_empty() {
+            ed.message = startup;
+        }
+        ed.save_session_on_quit(file);
+    }
     let keymaps = config.keymaps;
     let appearance = config.appearance;
 

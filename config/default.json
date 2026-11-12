@@ -11,6 +11,7 @@
     "backend": "daemon",
     "replay_bytes": 2097152,
     "socket": null,
+    "daemon_idle_exit": 60,
     "escape_keys": ["C-x", "M-x", "C-c"]
   },
   "session": {

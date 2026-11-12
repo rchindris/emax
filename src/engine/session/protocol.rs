@@ -67,16 +67,23 @@ pub enum DaemonMsg {
     Exited { id: SessionId, status: ExitStatus },
 }
 
-/// Write one framed message.
-pub fn write_frame<T: Serialize>(w: &mut impl Write, msg: &T) -> io::Result<()> {
-    let body = postcard::to_stdvec(msg).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    if body.len() > MAX_FRAME {
+/// One message as the bytes of a frame (length prefix included), for
+/// writers that queue frames and write them elsewhere.
+pub fn encode_frame<T: Serialize>(msg: &T) -> io::Result<Vec<u8>> {
+    // Encode straight after a placeholder length, so the frame is one allocation.
+    let buf = postcard::to_extend(msg, vec![0u8; 4]).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let len = buf.len() - 4;
+    if len > MAX_FRAME {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "message too large"));
     }
-    let mut buf = Vec::with_capacity(4 + body.len());
-    buf.extend_from_slice(&(body.len() as u32).to_be_bytes());
-    buf.extend_from_slice(&body);
-    w.write_all(&buf)?;
+    let mut buf = buf;
+    buf[..4].copy_from_slice(&(len as u32).to_be_bytes());
+    Ok(buf)
+}
+
+/// Write one framed message.
+pub fn write_frame<T: Serialize>(w: &mut impl Write, msg: &T) -> io::Result<()> {
+    w.write_all(&encode_frame(msg)?)?;
     w.flush()
 }
 
@@ -160,5 +167,83 @@ mod tests {
         assert_eq!(read_frame::<ClientMsg>(&mut &huge[..]).unwrap_err().kind(), io::ErrorKind::InvalidData);
         // Garbage body.
         assert!(read_frame::<ClientMsg>(&mut &[0u8, 0, 0, 2, 0xff, 0xff][..]).is_err());
+        // A length at the limit is accepted (then the body is missing).
+        let at_limit = (MAX_FRAME as u32).to_be_bytes();
+        assert_eq!(read_frame::<ClientMsg>(&mut &at_limit[..]).unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    /// A reader that hands out at most `step` bytes per read and fails every
+    /// other read with `Interrupted`, like a slow socket.
+    struct Trickle<'a> {
+        data: &'a [u8],
+        step: usize,
+        interrupt: bool,
+    }
+
+    impl Read for Trickle<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.interrupt = !self.interrupt;
+            if self.interrupt {
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            let n = self.step.min(buf.len()).min(self.data.len());
+            buf[..n].copy_from_slice(&self.data[..n]);
+            self.data = &self.data[n..];
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn partial_and_interrupted_reads_reassemble_frames() {
+        let msgs: Vec<DaemonMsg> = (0..20u64)
+            .map(|i| DaemonMsg::Output { id: SessionId(i), data: (0..i * 37).map(|b| b as u8).collect() })
+            .chain([DaemonMsg::Hello { version: PROTOCOL_VERSION, daemon_pid: 7 }])
+            .collect();
+        let mut wire = Vec::new();
+        for m in &msgs {
+            write_frame(&mut wire, m).unwrap();
+        }
+        for step in [1, 2, 3, 5, 64, 4096] {
+            let mut r = Trickle { data: &wire, step, interrupt: false };
+            for m in &msgs {
+                assert_eq!(read_frame::<DaemonMsg>(&mut r).unwrap().as_ref(), Some(m), "step {step}");
+            }
+            assert_eq!(read_frame::<DaemonMsg>(&mut r).unwrap(), None);
+        }
+        // A stream cut anywhere inside a frame is an error, never a message.
+        for cut in 1..wire.len().min(200) {
+            let mut r = &wire[..cut];
+            let mut results = Vec::new();
+            loop {
+                match read_frame::<DaemonMsg>(&mut r) {
+                    Ok(Some(m)) => results.push(m),
+                    Ok(None) => break,
+                    Err(_) => break,
+                }
+            }
+            assert!(results.iter().zip(&msgs).all(|(a, b)| a == b), "cut {cut}");
+        }
+    }
+
+    #[test]
+    fn oversized_messages_are_refused_when_writing() {
+        let big = ClientMsg::Request { req: 1, op: Op::Write { id: SessionId(1), data: vec![0; MAX_FRAME + 1] } };
+        let mut wire = Vec::new();
+        assert_eq!(write_frame(&mut wire, &big).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert!(wire.is_empty(), "nothing is written for a refused message");
+        // Just under the limit goes through and reads back.
+        let ok = ClientMsg::Request { req: 1, op: Op::Write { id: SessionId(1), data: vec![7; MAX_FRAME - 64] } };
+        write_frame(&mut wire, &ok).unwrap();
+        assert_eq!(read_frame::<ClientMsg>(&mut wire.as_slice()).unwrap(), Some(ok));
+    }
+
+    #[test]
+    fn encode_frame_matches_write_frame() {
+        let m = DaemonMsg::Reply { req: 3, result: Ok(Reply::Ok) };
+        let mut wire = Vec::new();
+        write_frame(&mut wire, &m).unwrap();
+        let f = encode_frame(&m).unwrap();
+        assert_eq!(f, wire);
+        assert_eq!(u32::from_be_bytes(f[..4].try_into().unwrap()) as usize, f.len() - 4);
     }
 }
