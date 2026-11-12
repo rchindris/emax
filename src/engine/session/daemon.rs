@@ -642,13 +642,18 @@ pub fn parse_args(args: &[String]) -> Result<Cli, String> {
 /// terminal (unless `--foreground`) and serve. Returns the process exit code
 /// (see [`exit_code`]); once detached, the starter only sees the bind result.
 pub fn main(args: &[String]) -> i32 {
-    let cli = match parse_args(args) {
+    let mut cli = match parse_args(args) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("emax --pty-daemon: {e}");
             return exit_code::USAGE;
         }
     };
+    // A detached daemon moves to $HOME; a relative socket path would then
+    // name another file (the log, removing the socket, waking the acceptor).
+    if let Ok(abs) = std::path::absolute(&cli.opts.socket) {
+        cli.opts.socket = abs;
+    }
     let bound = match bind(&cli.opts.socket) {
         Ok(b) => b,
         Err(e) => {

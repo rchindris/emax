@@ -160,3 +160,26 @@ fn the_daemon_command_line() {
     shut_down(b, &socket);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn a_detached_daemon_with_a_relative_socket_path_still_serves_and_exits() {
+    // The detached daemon moves to $HOME; the relative path must keep
+    // naming the socket it bound (for its log, its idle exit and cleanup).
+    let dir = temp_dir("rel");
+    let out = Command::new(EMAX)
+        .current_dir(&dir)
+        .args(["--pty-daemon", "--socket", "d.sock", "--idle-exit", "1"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(exit_code::OK), "{}", String::from_utf8_lossy(&out.stderr));
+    let socket = dir.join("d.sock");
+    assert!(socket.exists());
+    let mut b = DaemonBackend::connect(&socket, noop_waker()).expect("connect to the detached daemon");
+    let id = b.spawn(shell("echo rel-$((20+1))")).unwrap();
+    read_until(&mut b, id, "rel-21");
+    b.kill(id).unwrap();
+    drop(b);
+    wait_until("the idle daemon to exit and remove its socket", || !socket.exists());
+    assert!(dir.join("d.log").exists(), "the log sits next to the socket");
+    std::fs::remove_dir_all(dir).unwrap();
+}
