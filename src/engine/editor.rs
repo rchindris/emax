@@ -1,18 +1,28 @@
 //! The editor state that commands operate on: one buffer, one or more cursors,
 //! the kill ring, and per-command bookkeeping (undo groups, kill appending,
-//! transient-mark deactivation, shift-selection).
+//! transient-mark deactivation, shift-selection). Also the hooks, the window
+//! layout, the terminal buffers' state and the PTY backend.
 
+use std::collections::HashMap;
+use std::io;
 use std::ops::Range;
+use std::sync::{Arc, RwLock};
 
 use ropey::Rope;
 
-use super::buffer::Buffer;
+use super::buffer::{Buffer, BufferId};
 use super::buffers::BufferSlot;
-use super::config::Settings;
+use super::config::{PtyBackendKind, SessionConfig, TerminalConfig};
+use super::hooks::{Event, Hooks};
+use super::pty::{PtyBackend, Waker, local::LocalBackend, noop_waker};
+use super::session::client::DaemonBackend;
+use super::term::buffer::TermState;
+use super::window::Layout;
 use super::picker::Picker;
 use super::search::Swiper;
 use super::commands::{self, flags, Command};
 use super::cursor::Cursor;
+use super::modes::{MinorMode, Modes};
 use super::text;
 
 /// The raw prefix argument, as typed.
@@ -91,8 +101,12 @@ pub struct Editor {
     last_was_kill: bool,
 
     pub message: Option<String>,
-    pub fill_column: usize,
-    pub tab_width: usize,
+    /// Global settings and keymap, and the major/minor mode definitions.
+    pub(crate) modes: Arc<Modes>,
+    /// A command chosen in M-x, for the view to run (it may need to read a key first).
+    pub pending_command: Option<(&'static str, Args)>,
+    /// Commands run from M-x, most recent first.
+    pub command_history: Vec<&'static str>,
     pub last_command: &'static str,
     pub this_command: &'static str,
     /// Text to publish to the system clipboard (set on kill/copy).
@@ -104,10 +118,38 @@ pub struct Editor {
     pub reveal: Option<usize>,
     pub recenter_step: usize,
     pub quit_requested: bool,
+
+    /// Hook handlers, the event queue and timers (see `hooks.rs`).
+    pub hooks: Hooks,
+    /// Tabs and windows (see `window.rs`). The selected window shows `buf`.
+    pub layout: Layout,
+    /// The terminal side of each terminal buffer, by buffer id.
+    pub terminals: HashMap<BufferId, TermState>,
+    /// Runs terminal processes; created on first use (see `pty_backend`).
+    pub(crate) pty: Option<Box<dyn PtyBackend>>,
+    /// Given to the PTY backend: wakes the UI when output arrives. It calls
+    /// whatever `set_waker` installed last, so a backend created before the
+    /// UI exists (e.g. to reattach a restored session) still wakes it.
+    pub(crate) waker: Waker,
+    waker_target: Arc<RwLock<Waker>>,
+    pub terminal_config: Arc<TerminalConfig>,
+    pub session_config: SessionConfig,
 }
 
 impl Editor {
-    pub fn new(buf: Buffer) -> Self {
+    /// An editor showing `buf`, with the built-in configuration's modes
+    /// (`set_modes` installs the user's).
+    pub fn new(mut buf: Buffer) -> Self {
+        let modes = Modes::builtin();
+        buf.modes = modes.initial(&buf);
+        let mut hooks = Hooks::new();
+        hooks.push(Event::BufferCreated { buf: 1 });
+        let waker_target = Arc::new(RwLock::new(noop_waker()));
+        let target = waker_target.clone();
+        let waker: Waker = Arc::new(move || {
+            let w = target.read().unwrap_or_else(|e| e.into_inner()).clone();
+            w()
+        });
         Self {
             buf,
             cursors: vec![Cursor::new(1, 0)],
@@ -127,8 +169,9 @@ impl Editor {
             kill_happened: false,
             last_was_kill: false,
             message: None,
-            fill_column: 70,
-            tab_width: 4,
+            modes,
+            pending_command: None,
+            command_history: Vec::new(),
             last_command: "",
             this_command: "",
             clipboard_out: None,
@@ -137,13 +180,67 @@ impl Editor {
             reveal: None,
             recenter_step: 0,
             quit_requested: false,
+            hooks,
+            layout: Layout::new(1),
+            terminals: HashMap::new(),
+            pty: None,
+            waker,
+            waker_target,
+            terminal_config: TerminalConfig::builtin(),
+            session_config: SessionConfig::default(),
         }
     }
 
-    /// Apply settings from the configuration.
-    pub fn apply_settings(&mut self, s: &Settings) {
-        self.fill_column = s.fill_column;
-        self.tab_width = s.tab_width.max(1);
+    // ------------------------------------------------------- integration
+
+    /// The UI's wake-up function: backends call it when terminal output
+    /// arrives (including backends created before it was set). It is called
+    /// once right away: output may already be waiting (e.g. the replay of a
+    /// session restored before the UI existed), and a backend wakes only
+    /// once per batch until it is drained, so that wake-up went to the old
+    /// waker and the new one would otherwise never hear from it again.
+    pub fn set_waker(&mut self, waker: Waker) {
+        *self.waker_target.write().unwrap_or_else(|e| e.into_inner()) = waker.clone();
+        waker();
+    }
+
+    /// Use `backend` for terminal processes (tests use `pty::mock`).
+    pub fn set_pty_backend(&mut self, backend: Box<dyn PtyBackend>) {
+        self.pty = Some(backend);
+    }
+
+    /// The PTY backend, created on first use as `terminal.backend` says. If
+    /// the daemon can't be reached or started, falls back to running
+    /// processes locally (they then end with the editor) and says so.
+    pub fn pty_backend(&mut self) -> io::Result<&mut (dyn PtyBackend + 'static)> {
+        if self.pty.is_none() {
+            let cfg = self.terminal_config.clone();
+            let waker = self.waker.clone();
+            let backend: Box<dyn PtyBackend> = match cfg.backend {
+                PtyBackendKind::Local => Box::new(LocalBackend::new(waker)),
+                PtyBackendKind::Daemon => {
+                    let socket = super::session::socket_path(cfg.socket.as_deref());
+                    match DaemonBackend::connect_or_start(&socket, cfg.replay_bytes, cfg.daemon_idle_exit, waker.clone()) {
+                        Ok(b) => Box::new(b),
+                        Err(e) => {
+                            self.message = Some(format!("Session daemon unavailable ({e}); terminals will end with the editor"));
+                            Box::new(LocalBackend::new(waker))
+                        }
+                    }
+                }
+            };
+            self.pty = Some(backend);
+        }
+        Ok(self.pty.as_deref_mut().expect("backend was just created"))
+    }
+
+    /// The backend, if one has been created.
+    pub fn pty_backend_if_running(&mut self) -> Option<&mut (dyn PtyBackend + 'static)> {
+        self.pty.as_deref_mut()
+    }
+
+    pub fn set_terminal_config(&mut self, cfg: Arc<TerminalConfig>) {
+        self.terminal_config = cfg;
     }
 
     // ------------------------------------------------------------- accessors
@@ -211,6 +308,7 @@ impl Editor {
         for c in &mut self.cursors {
             c.adjust(range.start, range.end, inserted);
         }
+        self.layout.adjust_for_edit(self.buf_id, range.start, range.end, inserted);
         old
     }
 
@@ -333,13 +431,29 @@ impl Editor {
     // --------------------------------------------------------- run command
 
     pub fn execute(&mut self, name: &str, args: Args) {
-        match commands::lookup(name) {
+        if let Some(cmd) = commands::lookup(name) {
+            return self.run(cmd, args);
+        }
+        // Major mode commands come from the configuration.
+        let modes = self.modes.clone();
+        match modes.command(name) {
             Some(cmd) => self.run(cmd, args),
             None => self.message = Some(format!("Unknown command: {name}")),
         }
     }
 
+    fn read_only_message(&self) -> String {
+        format!("Buffer is read-only: {}", self.buf.name)
+    }
+
+    /// Run `cmd`, then emit `AfterCommand` and handle queued hook events.
     pub fn run(&mut self, cmd: &Command, args: Args) {
+        self.run_command(cmd, args);
+        self.emit(Event::AfterCommand { name: cmd.name.to_string() });
+        self.run_hooks();
+    }
+
+    fn run_command(&mut self, cmd: &Command, args: Args) {
         self.this_command = cmd.name;
         self.message = None;
         self.reveal = None;
@@ -348,6 +462,12 @@ impl Editor {
         self.kill_happened = false;
 
         let undoable = cmd.flags & flags::NO_UNDO == 0;
+        let read_only = self.minor_on(MinorMode::ReadOnly);
+        if read_only && matches!(cmd.name, "undo" | "undo-redo") {
+            self.message = Some(self.read_only_message());
+            self.last_command = cmd.name;
+            return;
+        }
         let self_insert = cmd.name == "self-insert-command";
         if self_insert && self.last_command != "self-insert-command" {
             self.buf.undo_boundary();
@@ -355,6 +475,9 @@ impl Editor {
         if undoable {
             self.buf.begin_group(&self.cursors, self_insert);
         }
+        // A refused edit is taken back below; the text comes back exactly,
+        // but points it moved (deletions collapse them) can't be recomputed.
+        let other_points = (undoable && read_only).then(|| (self.buf_id, self.layout.other_windows_cursors(self.buf_id)));
 
         // Shift-selection (Emacs' shift-select-mode).
         if cmd.flags & flags::MOTION != 0 {
@@ -375,7 +498,17 @@ impl Editor {
             self.message = Some(e);
         }
 
-        let edited = undoable && self.buf.end_group(&self.cursors);
+        // read-only-mode: the command ran, but its changes are taken back
+        // (what it put on the kill ring stays, as in Emacs).
+        let refused = if undoable && read_only { self.buf.abort_group() } else { None };
+        if let Some(before) = refused {
+            self.cursors = before;
+            if let Some((buf, saved)) = other_points {
+                self.layout.restore_cursors(buf, saved);
+            }
+            self.message = Some(self.read_only_message());
+        }
+        let edited = undoable && !read_only && self.buf.end_group(&self.cursors);
         if cmd.flags & flags::VERTICAL == 0 {
             for c in &mut self.cursors {
                 c.goal_col = None;

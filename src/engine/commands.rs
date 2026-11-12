@@ -1,12 +1,17 @@
 //! Interactive commands, named after their GNU Emacs counterparts. Every
 //! command runs on all cursors. `lookup` finds a command by name (for keymaps
-//! and, later, M-x).
+//! and M-x).
+//!
+//! Subsystems keep their own command tables next to their code (windows,
+//! terminal buffers, ...); [`TABLES`] lists them all, so adding a command
+//! never needs an edit here.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use super::cursor::Cursor;
 use super::editor::{Args, Editor, RawArg, Scroll};
+use super::modes::MinorMode;
 use super::text::{self, *};
 
 pub type CmdResult = Result<(), String>;
@@ -153,13 +158,28 @@ commands! {
     // files & app
     "save-buffer" => save_buffer, NO_UNDO, "Save the current buffer to its file.";
     "save-buffers-kill-terminal" => quit, NO_UNDO, "Exit (asks for a second press if the buffer is modified).";
-    "execute-extended-command" => execute_extended, NO_UNDO, "Read a command name and run it (not implemented yet).";
+    "execute-extended-command" => execute_extended, NO_UNDO, "Pick a command by name (fuzzy) and run it.";
+
+    // minor modes (major mode commands come from the configuration)
+    "auto-fill-mode" => auto_fill_mode, NO_UNDO, "Toggle breaking lines at fill-column while typing (with N: on if N > 0).";
+    "read-only-mode" => read_only_mode, NO_UNDO, "Toggle refusing changes to this buffer (with N: on if N > 0).";
+    "overwrite-mode" => overwrite_mode, NO_UNDO, "Toggle typing over the text after point (with N: on if N > 0).";
+    "electric-pair-mode" => electric_pair_mode, NO_UNDO, "Toggle inserting closing brackets and quotes (with N: on if N > 0).";
+}
+
+/// Every built-in command table: the editing commands here, then each
+/// subsystem's.
+pub static TABLES: &[&[Command]] = &[COMMANDS, super::window::COMMANDS, super::term::buffer::COMMANDS];
+
+/// Every built-in command (major mode commands come from the configuration).
+pub fn all() -> impl Iterator<Item = &'static Command> {
+    TABLES.iter().flat_map(|t| t.iter())
 }
 
 pub fn lookup(name: &str) -> Option<&'static Command> {
     static INDEX: OnceLock<HashMap<&'static str, &'static Command>> = OnceLock::new();
     INDEX
-        .get_or_init(|| COMMANDS.iter().map(|c| (c.name, c)).collect())
+        .get_or_init(|| all().map(|c| (c.name, c)).collect())
         .get(name)
         .copied()
 }
@@ -718,6 +738,24 @@ fn delete_char(ed: &mut Editor, a: &Args) -> CmdResult {
 }
 
 fn delete_backward_char(ed: &mut Editor, a: &Args) -> CmdResult {
+    if a.n() == 1 && ed.minor_on(MinorMode::ElectricPair) {
+        // Deleting the opening half of an empty pair deletes both halves.
+        return ed.each(|ed, i| {
+            if ed.delete_active_region(i) {
+                return Ok(());
+            }
+            let p = ed.cursors[i].point;
+            let r = &ed.buf.rope;
+            let (s, e) = match (char_before(r, p), char_at(r, p)) {
+                (Some(o), Some(c)) if PAIRS.contains(&(o, c)) => (p - 1, p + 1),
+                (Some(_), _) => (p - 1, p),
+                (None, _) => return err("Beginning of buffer"),
+            };
+            ed.replace(s..e, "");
+            ed.cursors[i].point = s;
+            Ok(())
+        });
+    }
     delete_char(ed, &Args { raw: Some(RawArg::Number(-a.n())), ..a.clone() })
 }
 
@@ -843,18 +881,118 @@ fn delete_trailing_whitespace(ed: &mut Editor, _: &Args) -> CmdResult {
 
 fn self_insert(ed: &mut Editor, a: &Args) -> CmdResult {
     let Some(t) = a.text.clone() else { return Ok(()) };
-    let s = t.repeat(a.n().max(0) as usize);
+    let n = a.n().max(0) as usize;
+    let s = t.repeat(n);
+    let fill = (ed.minor_on(MinorMode::AutoFill) && t.chars().all(is_hspace)).then(|| ed.fill_column());
+    let overwrite = ed.minor_on(MinorMode::Overwrite);
+    let mut chars = t.chars();
+    let pair = match (chars.next(), chars.next()) {
+        (Some(c), None) if n == 1 && ed.minor_on(MinorMode::ElectricPair) => Some(c),
+        _ => None,
+    };
     ed.each(|ed, i| {
-        ed.delete_active_region(i);
-        ed.insert_at_cursor(i, &s);
+        if let Some(c) = pair {
+            if electric_pair(ed, i, c) {
+                return Ok(());
+            }
+        }
+        let had_region = ed.delete_active_region(i);
+        if let Some(width) = fill {
+            auto_fill(ed, i, width);
+        }
+        if overwrite && !had_region {
+            // Replace as many chars as are typed, but never the end of the line.
+            let p = ed.cursors[i].point;
+            let end = (p + s.chars().count()).min(line_end(&ed.buf.rope, p));
+            ed.replace(p..end, &s);
+            ed.cursors[i].point = p + s.chars().count();
+        } else {
+            ed.insert_at_cursor(i, &s);
+        }
         Ok(())
     })
 }
 
+/// The pairs electric-pair-mode completes.
+const PAIRS: [(char, char); 4] = [('(', ')'), ('[', ']'), ('{', '}'), ('"', '"')];
+
+/// electric-pair-mode for cursor `i` typing `c`: wrap the region in a pair,
+/// step over a closer that is already there, or insert both halves of a
+/// pair. Returns false when `c` should just be inserted.
+fn electric_pair(ed: &mut Editor, i: usize, c: char) -> bool {
+    let close = PAIRS.iter().find(|p| p.0 == c).map(|p| p.1);
+    let region = ed.cursors[i].region().filter(|r| !r.is_empty());
+    if let Some(r) = region {
+        let Some(close) = close else { return false };
+        let at_end = ed.cursors[i].point == r.end;
+        let inner = ed.text(r.clone());
+        let len = inner.chars().count();
+        ed.replace(r.clone(), &format!("{c}{inner}{close}"));
+        let cur = &mut ed.cursors[i];
+        cur.point = if at_end { r.start + len + 2 } else { r.start + 1 };
+        cur.deactivate();
+        return true;
+    }
+    let p = ed.cursors[i].point;
+    let r = &ed.buf.rope;
+    let (prev, next) = (char_before(r, p), char_at(r, p));
+    if next == Some(c) && PAIRS.iter().any(|p| p.1 == c) {
+        ed.cursors[i].point = p + 1;
+        return true;
+    }
+    let Some(close) = close else { return false };
+    // Don't pair in front of a word, or a quote right after one (an apostrophe-like use).
+    if next.is_some_and(is_word) || (close == c && prev.is_some_and(is_word)) {
+        return false;
+    }
+    ed.replace(p..p, &format!("{c}{close}"));
+    ed.cursors[i].point = p + 1;
+    true
+}
+
+/// auto-fill-mode for cursor `i`: while point is past `width`, break its line
+/// at the last space that keeps the text before it within `width` (or after
+/// the first word, if that alone is too long), indenting like the line.
+fn auto_fill(ed: &mut Editor, i: usize, width: usize) {
+    loop {
+        let r = &ed.buf.rope;
+        let p = ed.cursors[i].point;
+        if column(r, p) <= width {
+            return;
+        }
+        let ls = line_start(r, p);
+        let ie = indentation_end(r, ls).min(p);
+        let blank = |b: usize| char_at(r, b).is_some_and(is_hspace);
+        let Some(b) = (ie..p).rev().find(|&b| blank(b) && b - ls <= width).or_else(|| (ie..p).find(|&b| blank(b))) else {
+            return;
+        };
+        let (mut s, mut e) = (b, b);
+        while s > ie && blank(s - 1) {
+            s -= 1;
+        }
+        while e < p && blank(e) {
+            e += 1;
+        }
+        if e >= p {
+            return; // nothing but spaces after the break
+        }
+        let indent = r.slice(ls..ie).to_string();
+        ed.replace(s..e, &format!("\n{indent}"));
+    }
+}
+
+fn auto_fill_column(ed: &Editor) -> Option<usize> {
+    ed.minor_on(MinorMode::AutoFill).then(|| ed.fill_column())
+}
+
 fn newline(ed: &mut Editor, a: &Args) -> CmdResult {
     let n = a.n().max(0) as usize;
+    let fill = auto_fill_column(ed);
     ed.each(|ed, i| {
         ed.delete_active_region(i);
+        if let Some(width) = fill {
+            auto_fill(ed, i, width);
+        }
         let p = ed.cursors[i].point;
         // Like electric-indent: drop trailing space before point, copy indentation.
         let indent = {
@@ -876,8 +1014,12 @@ fn newline(ed: &mut Editor, a: &Args) -> CmdResult {
 
 fn plain_newline(ed: &mut Editor, a: &Args) -> CmdResult {
     let s = "\n".repeat(a.n().max(0) as usize);
+    let fill = auto_fill_column(ed);
     ed.each(|ed, i| {
         ed.delete_active_region(i);
+        if let Some(width) = fill {
+            auto_fill(ed, i, width);
+        }
         ed.insert_at_cursor(i, &s);
         Ok(())
     })
@@ -918,7 +1060,7 @@ fn indent_lines(ed: &mut Editor, i: usize, range: std::ops::Range<usize>, by: i6
 }
 
 fn indent_for_tab(ed: &mut Editor, _: &Args) -> CmdResult {
-    let tw = ed.tab_width;
+    let tw = ed.tab_width();
     ed.each(|ed, i| {
         if let Some(r) = ed.cursors[i].region() {
             indent_lines(ed, i, r, tw as i64);
@@ -932,7 +1074,7 @@ fn indent_for_tab(ed: &mut Editor, _: &Args) -> CmdResult {
 }
 
 fn indent_rigidly(ed: &mut Editor, a: &Args) -> CmdResult {
-    let by = if a.raw.is_some() { a.n() } else { ed.tab_width as i64 };
+    let by = if a.raw.is_some() { a.n() } else { ed.tab_width() as i64 };
     ed.each(|ed, i| {
         let Some(r) = ed.cursors[i].mark_region() else {
             return err("The mark is not set now, so there is no region");
@@ -1111,7 +1253,7 @@ fn capitalize_region(ed: &mut Editor, _: &Args) -> CmdResult {
 // ================================================================= filling
 
 fn fill_paragraph(ed: &mut Editor, _: &Args) -> CmdResult {
-    let width = ed.fill_column;
+    let width = ed.fill_column();
     ed.each(|ed, i| {
         let r = &ed.buf.rope;
         let (s, e) = paragraph_bounds(r, ed.cursors[i].point);
@@ -1130,7 +1272,7 @@ fn fill_paragraph(ed: &mut Editor, _: &Args) -> CmdResult {
 
 fn set_fill_column(ed: &mut Editor, a: &Args) -> CmdResult {
     let col = if a.raw.is_some() { a.n().max(1) as usize } else { ed.primary_line_col().1 };
-    ed.fill_column = col;
+    ed.buf.modes.local.fill_column = Some(col);
     ed.message = Some(format!("Fill column set to {col}"));
     Ok(())
 }
@@ -1152,9 +1294,18 @@ fn restore(ed: &mut Editor, cursors: Vec<Cursor>) {
     }
 }
 
+/// Keep the points of other windows showing this buffer in place across
+/// the text undo or redo changed.
+fn follow_changes(ed: &mut Editor, changes: &[super::buffer::Change]) {
+    for c in changes {
+        ed.layout.adjust_for_edit(ed.buf_id, c.start, c.end, c.inserted);
+    }
+}
+
 fn undo(ed: &mut Editor, a: &Args) -> CmdResult {
     for _ in 0..a.n().max(1) {
-        let Some(cursors) = ed.buf.undo() else { return err("No further undo information") };
+        let Some((cursors, changes)) = ed.buf.undo() else { return err("No further undo information") };
+        follow_changes(ed, &changes);
         restore(ed, cursors);
     }
     ed.message = Some("Undo".into());
@@ -1163,7 +1314,8 @@ fn undo(ed: &mut Editor, a: &Args) -> CmdResult {
 
 fn undo_redo(ed: &mut Editor, a: &Args) -> CmdResult {
     for _ in 0..a.n().max(1) {
-        let Some(cursors) = ed.buf.redo() else { return err("No further redo information") };
+        let Some((cursors, changes)) = ed.buf.redo() else { return err("No further redo information") };
+        follow_changes(ed, &changes);
         restore(ed, cursors);
     }
     ed.message = Some("Redo".into());
@@ -1377,9 +1529,33 @@ fn quit(ed: &mut Editor, _: &Args) -> CmdResult {
         return err("Buffer modified; save it first, or repeat the command to quit without saving");
     }
     ed.quit_requested = true;
+    ed.emit(super::hooks::Event::KillEmacs);
     Ok(())
 }
 
-fn execute_extended(_: &mut Editor, _: &Args) -> CmdResult {
-    err("execute-extended-command needs the minibuffer, which is the next milestone")
+fn execute_extended(ed: &mut Editor, a: &Args) -> CmdResult {
+    ed.open_command_picker(Args::with_raw(a.raw));
+    Ok(())
+}
+
+// ============================================================ minor modes
+
+fn auto_fill_mode(ed: &mut Editor, a: &Args) -> CmdResult {
+    ed.minor_mode_command(MinorMode::AutoFill, a);
+    Ok(())
+}
+
+fn read_only_mode(ed: &mut Editor, a: &Args) -> CmdResult {
+    ed.minor_mode_command(MinorMode::ReadOnly, a);
+    Ok(())
+}
+
+fn overwrite_mode(ed: &mut Editor, a: &Args) -> CmdResult {
+    ed.minor_mode_command(MinorMode::Overwrite, a);
+    Ok(())
+}
+
+fn electric_pair_mode(ed: &mut Editor, a: &Args) -> CmdResult {
+    ed.minor_mode_command(MinorMode::ElectricPair, a);
+    Ok(())
 }

@@ -92,6 +92,38 @@ theme_colors! {
     badge,
     /// The veil drawn over the editor behind the buffer picker (use an alpha).
     overlay,
+    /// Terminal ANSI color 0 (black).
+    term_black,
+    /// Terminal ANSI color 1 (red).
+    term_red,
+    /// Terminal ANSI color 2 (green).
+    term_green,
+    /// Terminal ANSI color 3 (yellow).
+    term_yellow,
+    /// Terminal ANSI color 4 (blue).
+    term_blue,
+    /// Terminal ANSI color 5 (magenta).
+    term_magenta,
+    /// Terminal ANSI color 6 (cyan).
+    term_cyan,
+    /// Terminal ANSI color 7 (white).
+    term_white,
+    /// Terminal ANSI color 8 (bright black).
+    term_bright_black,
+    /// Terminal ANSI color 9 (bright red).
+    term_bright_red,
+    /// Terminal ANSI color 10 (bright green).
+    term_bright_green,
+    /// Terminal ANSI color 11 (bright yellow).
+    term_bright_yellow,
+    /// Terminal ANSI color 12 (bright blue).
+    term_bright_blue,
+    /// Terminal ANSI color 13 (bright magenta).
+    term_bright_magenta,
+    /// Terminal ANSI color 14 (bright cyan).
+    term_bright_cyan,
+    /// Terminal ANSI color 15 (bright white).
+    term_bright_white,
 }
 
 /// Parse `#rgb`, `#rrggbb` or `#rrggbbaa` (the `#` is optional).
@@ -228,6 +260,30 @@ fn resolve_family(name: &str) -> String {
 pub struct Themes {
     pub light: Theme,
     pub dark: Theme,
+}
+
+impl Theme {
+    /// The 16 ANSI colors terminals draw with (0–7 normal, 8–15 bright).
+    pub fn ansi(&self) -> [Rgba; 16] {
+        [
+            self.term_black,
+            self.term_red,
+            self.term_green,
+            self.term_yellow,
+            self.term_blue,
+            self.term_magenta,
+            self.term_cyan,
+            self.term_white,
+            self.term_bright_black,
+            self.term_bright_red,
+            self.term_bright_green,
+            self.term_bright_yellow,
+            self.term_bright_blue,
+            self.term_bright_magenta,
+            self.term_bright_cyan,
+            self.term_bright_white,
+        ]
+    }
 }
 
 impl Themes {

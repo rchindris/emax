@@ -3,6 +3,21 @@
     "fill_column": 70,
     "tab_width": 4
   },
+  "terminal": {
+    "shell": null,
+    "shell_args": [],
+    "term": "xterm-256color",
+    "scrollback_lines": 10000,
+    "backend": "daemon",
+    "replay_bytes": 2097152,
+    "socket": null,
+    "daemon_idle_exit": 60,
+    "escape_keys": ["C-x", "M-x", "C-c"]
+  },
+  "session": {
+    "restore_session": true,
+    "state_dir": null
+  },
   "font": {
     "family": "monospace",
     "ui_family": "system-ui",
@@ -31,7 +46,23 @@
       "row_selected": "#2f3646",
       "row_hover": "#2a2d35",
       "badge": "#353a45",
-      "overlay": "#0b0c0f80"
+      "overlay": "#0b0c0f80",
+      "term_black": "#3f4451",
+      "term_red": "#e06c75",
+      "term_green": "#98c379",
+      "term_yellow": "#e5c07b",
+      "term_blue": "#61afef",
+      "term_magenta": "#c678dd",
+      "term_cyan": "#56b6c2",
+      "term_white": "#d4d7dd",
+      "term_bright_black": "#5c6370",
+      "term_bright_red": "#ff7b86",
+      "term_bright_green": "#b1e18b",
+      "term_bright_yellow": "#efb074",
+      "term_bright_blue": "#67cdff",
+      "term_bright_magenta": "#e48bff",
+      "term_bright_cyan": "#63d4e0",
+      "term_bright_white": "#ffffff"
     },
     "emax-light": {
       "background": "#fafafa",
@@ -53,7 +84,23 @@
       "row_selected": "#dfe6f5",
       "row_hover": "#e8e9ec",
       "badge": "#e2e3e7",
-      "overlay": "#00000033"
+      "overlay": "#00000033",
+      "term_black": "#383a42",
+      "term_red": "#e45649",
+      "term_green": "#50a14f",
+      "term_yellow": "#c18401",
+      "term_blue": "#4078f2",
+      "term_magenta": "#a626a4",
+      "term_cyan": "#0184bc",
+      "term_white": "#a0a1a7",
+      "term_bright_black": "#696c77",
+      "term_bright_red": "#ca1243",
+      "term_bright_green": "#3e953a",
+      "term_bright_yellow": "#986801",
+      "term_bright_blue": "#2f5af3",
+      "term_bright_magenta": "#8a3fa0",
+      "term_bright_cyan": "#0997b3",
+      "term_bright_white": "#fafafa"
     },
     "solarized-dark": {
       "background": "#002b36",
@@ -75,7 +122,23 @@
       "row_selected": "#0d475f",
       "row_hover": "#002b36",
       "badge": "#002b36",
-      "overlay": "#002b3699"
+      "overlay": "#002b3699",
+      "term_black": "#073642",
+      "term_red": "#dc322f",
+      "term_green": "#859900",
+      "term_yellow": "#b58900",
+      "term_blue": "#268bd2",
+      "term_magenta": "#d33682",
+      "term_cyan": "#2aa198",
+      "term_white": "#eee8d5",
+      "term_bright_black": "#002b36",
+      "term_bright_red": "#cb4b16",
+      "term_bright_green": "#586e75",
+      "term_bright_yellow": "#657b83",
+      "term_bright_blue": "#839496",
+      "term_bright_magenta": "#6c71c4",
+      "term_bright_cyan": "#93a1a1",
+      "term_bright_white": "#fdf6e3"
     },
     "solarized-light": {
       "background": "#fdf6e3",
@@ -97,7 +160,72 @@
       "row_selected": "#c6d5d4",
       "row_hover": "#fdf6e3",
       "badge": "#fdf6e3",
-      "overlay": "#002b3626"
+      "overlay": "#002b3626",
+      "term_black": "#073642",
+      "term_red": "#dc322f",
+      "term_green": "#859900",
+      "term_yellow": "#b58900",
+      "term_blue": "#268bd2",
+      "term_magenta": "#d33682",
+      "term_cyan": "#2aa198",
+      "term_white": "#eee8d5",
+      "term_bright_black": "#002b36",
+      "term_bright_red": "#cb4b16",
+      "term_bright_green": "#586e75",
+      "term_bright_yellow": "#657b83",
+      "term_bright_blue": "#839496",
+      "term_bright_magenta": "#6c71c4",
+      "term_bright_cyan": "#93a1a1",
+      "term_bright_white": "#fdf6e3"
+    }
+  },
+  "modes": {
+    "default_major_mode": "fundamental-mode",
+    "initial_major_mode": "text-mode",
+    "major": {
+      "fundamental-mode": {
+        "lighter": "Fundamental"
+      },
+      "text-mode": {
+        "lighter": "Text",
+        "files": ["*.txt", "*.text", "README", "LICENSE", "COPYING"],
+        "minor_modes": ["auto-fill-mode"]
+      },
+      "markdown-mode": {
+        "lighter": "Markdown",
+        "parent": "text-mode",
+        "files": ["*.md", "*.markdown"]
+      },
+      "prog-mode": {
+        "lighter": "Prog",
+        "minor_modes": ["electric-pair-mode"]
+      },
+      "rust-mode": {
+        "lighter": "Rust",
+        "parent": "prog-mode",
+        "files": ["*.rs"],
+        "interpreters": ["rust-script"],
+        "editor": { "fill_column": 100, "tab_width": 4 }
+      },
+      "json-mode": {
+        "lighter": "JSON",
+        "parent": "prog-mode",
+        "files": ["*.json", "*.jsonc", ".prettierrc", ".eslintrc"],
+        "editor": { "tab_width": 2 }
+      },
+      "lisp-mode": {
+        "lighter": "Lisp",
+        "parent": "prog-mode",
+        "files": ["*.lisp", "*.lsp", "*.cl", "*.el", "*.scm", "*.ss", "*.rkt", "*.clj", "*.edn"],
+        "interpreters": ["sbcl", "clisp", "guile", "racket", "steel", "emacs"],
+        "editor": { "tab_width": 2 }
+      }
+    },
+    "minor": {
+      "auto-fill-mode": { "lighter": "Fill" },
+      "read-only-mode": { "lighter": "RO" },
+      "overwrite-mode": { "lighter": "Ovwrt" },
+      "electric-pair-mode": { "lighter": "" }
     }
   },
   "keymaps": {
@@ -242,6 +370,30 @@
       "s-q": "save-buffers-kill-terminal",
       "M-x": "execute-extended-command",
 
+      "C-x 2": "split-window-below",
+      "C-x 3": "split-window-right",
+      "C-x 0": "delete-window",
+      "C-x 1": "delete-other-windows",
+      "C-x o": "other-window",
+      "C-x +": "balance-windows",
+      "C-x ^": "enlarge-window",
+      "C-x }": "enlarge-window-horizontally",
+      "C-x {": "shrink-window-horizontally",
+      "C-x w <left>": "windmove-left",
+      "C-x w <right>": "windmove-right",
+      "C-x w <up>": "windmove-up",
+      "C-x w <down>": "windmove-down",
+      "C-x t 2": "tab-new",
+      "C-x t 0": "tab-close",
+      "C-x t o": "tab-next",
+      "C-x t S-o": "tab-previous",
+      "C-x t r": "tab-rename",
+      "C-TAB": "tab-next",
+      "C-S-TAB": "tab-previous",
+
+      "C-x C-q": "read-only-mode",
+      "<insert>": "overwrite-mode",
+
       "C-u": "universal-argument",
       "M--": "negative-argument",
       "C--": "negative-argument",
@@ -276,6 +428,21 @@
       "M-DEL": "picker-delete-word",
       "C-w": "picker-delete-word",
       "C-k": "picker-kill-buffer"
+    },
+
+    "terminal": {
+      "C-c C-j": "term-copy-mode",
+      "C-c C-k": "term-char-mode",
+      "C-c C-c": "term-interrupt-subjob",
+      "C-c C-d": "term-send-eof",
+      "C-c C-z": "term-stop-subjob",
+      "C-c C-\\": "term-quit-subjob",
+      "C-c C-y": "term-paste",
+      "s-v": "term-paste",
+      "S-<prior>": "term-scroll-up",
+      "S-<next>": "term-scroll-down",
+      "C-TAB": "tab-next",
+      "C-S-TAB": "tab-previous"
     },
 
     "search": {

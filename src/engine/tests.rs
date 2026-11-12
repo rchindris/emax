@@ -28,7 +28,7 @@ fn t(s: &str) -> T {
     }
     ed.normalize_cursors();
     let k = Keymaps::builtin();
-    T { ed, d: Dispatcher::new(k.global), picker_keys: k.picker, search_keys: k.search }
+    T { ed, d: Dispatcher::new(), picker_keys: k.picker, search_keys: k.search }
 }
 
 impl T {
@@ -54,9 +54,14 @@ impl T {
     fn key(&mut self, k: Key) {
         if self.ed.picker.is_some() {
             self.ed.picker_key(&self.picker_keys, &k);
+            if let Some((cmd, args)) = self.ed.pending_command.take() {
+                if let Outcome::Run(cmd, args) = self.d.invoke(cmd, args) {
+                    self.ed.execute(cmd, args);
+                }
+            }
         } else if self.ed.swiper.is_some() {
             self.ed.swiper_key(&self.search_keys, &k);
-        } else if let Outcome::Run(cmd, args) = self.d.dispatch(&k) {
+        } else if let Outcome::Run(cmd, args) = self.d.dispatch(&k, &self.ed.active_keymaps()) {
             self.ed.execute(cmd, args);
         }
     }
@@ -290,7 +295,7 @@ fn mark_ring_and_exchange() {
 #[test]
 fn fill_paragraph() {
     let mut x = t("|aaa bbb ccc ddd eee fff");
-    x.ed.fill_column = 11;
+    x.ed.buf.modes.local.fill_column = Some(11);
     x.keys("M-q");
     assert_eq!(x.ed.buf.rope.to_string(), "aaa bbb ccc\nddd eee fff");
 }
@@ -546,4 +551,251 @@ fn swiper_yanks_symbol_at_point() {
     x.keys("C-f C-f C-f C-f C-f C-s M-n");
     assert_eq!(x.ed.swiper.as_ref().unwrap().query, "my_var");
     assert_eq!(swiper_lines(&x), [0, 1]);
+}
+
+// =================================================================== modes
+
+/// An editor on a buffer visiting `path` (not read from disk) with `s` as text.
+fn file(path: &str, s: &str) -> T {
+    let mut x = t(s);
+    x.ed.buf.path = Some(std::path::PathBuf::from(path));
+    x.ed.buf.name = path.to_string();
+    let modes = x.ed.modes().initial(&x.ed.buf);
+    x.ed.buf.modes = modes;
+    x
+}
+
+fn mode_line(x: &T) -> String {
+    x.ed.mode_lighters(&x.ed.buf)
+}
+
+#[test]
+fn major_mode_selection() {
+    assert_eq!(file("main.rs", "").ed.major_mode(), "rust-mode");
+    assert_eq!(file("notes.md", "").ed.major_mode(), "markdown-mode");
+    assert_eq!(file("README", "").ed.major_mode(), "text-mode");
+    assert_eq!(file("data.json", "").ed.major_mode(), "json-mode");
+    assert_eq!(file("Cargo.lock", "").ed.major_mode(), "fundamental-mode");
+    // A marker beats the file name; a shebang beats it too.
+    assert_eq!(file("main.rs", "// -*- mode: lisp -*-\n").ed.major_mode(), "lisp-mode");
+    assert_eq!(file("script", "#!/usr/bin/env steel\n").ed.major_mode(), "lisp-mode");
+    assert_eq!(file("script", "#!/usr/bin/env sbcl\n;; -*- text -*-\n").ed.major_mode(), "text-mode");
+    // An unknown marker falls through to the file name.
+    assert_eq!(file("main.rs", "// -*- cobol -*-\n").ed.major_mode(), "rust-mode");
+    // Non-file buffers: fundamental, except *scratch*.
+    assert_eq!(t("").ed.major_mode(), "fundamental-mode");
+    assert_eq!(Editor::new(Buffer::from_str("*scratch*", "")).major_mode(), "text-mode");
+}
+
+#[test]
+fn modes_bring_settings_and_minor_modes() {
+    let x = file("main.rs", "");
+    assert_eq!((x.ed.fill_column(), x.ed.tab_width()), (100, 4)); // rust-mode's own
+    assert!(x.ed.minor_on(MinorMode::ElectricPair)); // from prog-mode, its parent
+    assert_eq!(mode_line(&x), "Rust");
+    let x = file("notes.md", "");
+    assert_eq!((x.ed.fill_column(), x.ed.tab_width()), (70, 4)); // global
+    assert!(x.ed.minor_on(MinorMode::AutoFill)); // from text-mode, its parent
+    assert_eq!(mode_line(&x), "Markdown Fill");
+    assert!(x.ed.modes().derives_from("markdown-mode", "text-mode"));
+}
+
+#[test]
+fn switching_major_mode() {
+    let mut x = file("main.rs", "");
+    x.keys("C-u 5 C-x f"); // buffer-local fill column
+    assert_eq!(x.ed.fill_column(), 5);
+    x.keys("C-x C-q"); // read-only survives a mode switch, other locals don't
+    x.ed.execute("text-mode", Args::default());
+    assert_eq!(x.ed.major_mode(), "text-mode");
+    assert_eq!(x.ed.fill_column(), 70);
+    assert!(!x.ed.minor_on(MinorMode::ElectricPair));
+    assert!(x.ed.minor_on(MinorMode::AutoFill));
+    assert_eq!(mode_line(&x), "Text Fill RO");
+}
+
+#[test]
+fn minor_mode_toggle_arguments() {
+    let mut x = t("");
+    x.keys("<insert>");
+    assert!(x.ed.minor_on(MinorMode::Overwrite));
+    assert_eq!(x.msg(), "Overwrite mode enabled in current buffer");
+    x.keys("<insert>");
+    assert!(!x.ed.minor_on(MinorMode::Overwrite));
+    x.keys("C-u <insert> C-u <insert>"); // positive: on, stays on
+    assert!(x.ed.minor_on(MinorMode::Overwrite));
+    x.keys("M-- <insert>");
+    assert!(!x.ed.minor_on(MinorMode::Overwrite));
+    x.keys("M-0 <insert>");
+    assert!(!x.ed.minor_on(MinorMode::Overwrite));
+}
+
+#[test]
+fn read_only_refuses_changes() {
+    let mut x = t("ab|c");
+    x.keys("C-x C-q");
+    x.typ("x").keys("C-d C-a");
+    assert_eq!(x.show(), "|abc");
+    x.keys("C-e DEL");
+    assert_eq!(x.show(), "abc|");
+    assert_eq!(x.msg(), "Buffer is read-only: test");
+    x.keys("C-a C-k"); // the kill reaches the kill ring, the text stays
+    assert_eq!(x.show(), "|abc");
+    assert_eq!(x.ed.kill_ring.last().unwrap(), "abc");
+    x.keys("C-/");
+    assert_eq!(x.msg(), "Buffer is read-only: test");
+    x.keys("C-x C-q C-k");
+    assert_eq!(x.show(), "|");
+}
+
+#[test]
+fn overwrite_mode_types_over() {
+    let mut x = t("|abcd\nef");
+    x.keys("<insert>");
+    x.typ("XY");
+    assert_eq!(x.show(), "XY|cd\nef");
+    x.typ("ZZZ"); // never eats the newline
+    assert_eq!(x.show(), "XYZZZ|\nef");
+    x.keys("C-/");
+    assert_eq!(x.show(), "|abcd\nef");
+}
+
+#[test]
+fn electric_pair_mode() {
+    let mut x = file("main.rs", "|");
+    x.typ("f(");
+    assert_eq!(x.show(), "f(|)");
+    x.typ("\"a");
+    assert_eq!(x.show(), "f(\"a|\")");
+    x.typ("\")"); // steps over the closers
+    assert_eq!(x.show(), "f(\"a\")|");
+    x.typ(" [");
+    assert_eq!(x.show(), "f(\"a\") [|]");
+    x.keys("DEL"); // deleting an empty pair deletes both halves
+    assert_eq!(x.show(), "f(\"a\") |");
+    // No pairing in front of a word; a region gets wrapped.
+    let mut x = file("main.rs", "|word");
+    x.typ("(");
+    assert_eq!(x.show(), "(|word");
+    let mut x = file("main.rs", "|word");
+    x.keys("M-@").typ("[");
+    assert_eq!(x.show(), "[|word]");
+    // Off in text buffers.
+    let mut x = t("|");
+    x.typ("(");
+    assert_eq!(x.show(), "(|");
+}
+
+#[test]
+fn auto_fill_breaks_lines() {
+    let mut x = file("notes.md", "|");
+    x.ed.buf.modes.local.fill_column = Some(20);
+    x.typ("  the quick brown fox jumps over the lazy dog ");
+    assert_eq!(x.show(), "  the quick brown\n  fox jumps over the\n  lazy dog |");
+    // A word longer than the line goes on a line of its own.
+    let mut x = file("notes.md", "|");
+    x.ed.buf.modes.local.fill_column = Some(5);
+    x.typ("a abcdefghij b\n");
+    assert_eq!(x.show(), "a\nabcdefghij\nb\n|");
+    // Off: nothing happens.
+    let mut x = t("|");
+    x.ed.buf.modes.local.fill_column = Some(5);
+    x.typ("aaa bbb ccc ");
+    assert_eq!(x.show(), "aaa bbb ccc |");
+}
+
+#[test]
+fn mode_keymaps_layer_over_global() {
+    let user = r#"{
+        "modes": {
+            "major": {
+                "rust-mode": { "keymap": { "C-c C-f": "fill-paragraph", "C-f": "forward-word" } },
+                "prog-mode": { "keymap": { "C-c C-k": "kill-whole-line", "C-f": "end-of-buffer" } },
+                "go-mode": { "parent": "prog-mode", "files": ["*.go"], "editor": { "tab_width": 8 } }
+            },
+            "minor": { "overwrite-mode": { "lighter": "OVR", "keymap": { "C-f": "backward-char" } } }
+        },
+        "keymaps": { "global": { "C-c m": "go-mode" } }
+    }"#;
+    let c = Config::from_layers(&[("built-in", config::DEFAULT_JSON), ("user", user)]);
+    assert!(c.warnings.is_empty(), "{:#?}", c.warnings);
+    let mut x = file("main.rs", "|ab cd\nline");
+    x.ed.set_modes(std::sync::Arc::new(c.modes));
+    assert_eq!(x.ed.major_mode(), "rust-mode");
+    x.keys("C-f"); // the major mode's own binding beats its parent's and the global one
+    assert_eq!(x.show(), "ab| cd\nline");
+    x.keys("C-c C-k"); // inherited from prog-mode
+    assert_eq!(x.show(), "|line");
+    x.keys("<insert> C-e C-f"); // a minor mode's keymap beats the major mode's
+    assert_eq!(x.show(), "lin|e");
+    assert_eq!(mode_line(&x), "Rust OVR");
+    x.keys("C-c m"); // a user-defined major mode, bound globally
+    assert_eq!(x.ed.major_mode(), "go-mode");
+    assert_eq!(x.ed.tab_width(), 8);
+    assert_eq!(mode_line(&x), "Go"); // lighter from the name; overwrite was dropped
+}
+
+#[test]
+fn modes_config_problems_are_reported() {
+    let user = r#"{
+        "modes": {
+            "default_major_mode": "nope-mode",
+            "major": {
+                "a-mode": { "parent": "b-mode" },
+                "b-mode": { "parent": "a-mode" },
+                "c-mode": { "parent": "missing-mode", "minor_modes": ["sparkle-mode"], "editor": { "tab_width": 0 } },
+                "badname": {},
+                "undo-mode": {},
+                "auto-fill-mode": {}
+            },
+            "minor": { "sparkle-mode": {} }
+        }
+    }"#;
+    let c = Config::from_layers(&[("built-in", config::DEFAULT_JSON), ("user", user)]);
+    let w = c.warnings.join("\n");
+    for needle in [
+        "unknown major mode \"nope-mode\"",
+        "makes a cycle",
+        "unknown parent mode \"missing-mode\"",
+        "unknown minor mode \"sparkle-mode\"",
+        "tab_width must be at least 1",
+        "modes.major.badname: a major mode's name must end in \"-mode\"",
+        "modes.major.auto-fill-mode: the name is already a command",
+    ] {
+        assert!(w.contains(needle), "missing {needle:?} in:\n{w}");
+    }
+    let m = &c.modes;
+    assert_eq!(m.default_major, "fundamental-mode");
+    assert!(m.major("c-mode").is_some_and(|c| c.parent.is_none()));
+    assert!(m.chain("a-mode").len() <= 2);
+    assert!(m.major("undo-mode").is_some()); // "undo-mode" isn't a command, so it's allowed
+}
+
+#[test]
+fn execute_extended_command() {
+    let mut x = t("hello |world");
+    x.keys("M-x");
+    assert!(x.ed.picker.is_some());
+    x.typ("upcase-word").keys("RET");
+    assert!(x.ed.picker.is_none());
+    assert_eq!(x.show(), "hello WORLD|");
+    // The prefix argument typed before M-x reaches the command.
+    let mut x = t("|abcdef");
+    x.keys("C-u 3 M-x").typ("forward-char").keys("RET");
+    assert_eq!(x.show(), "abc|def");
+    // Commands that read a character still do.
+    x.keys("M-x").typ("zap-to-char").keys("RET").typ("e");
+    assert_eq!(x.show(), "abc|f");
+    // Mode commands are there too; the last command used comes first.
+    x.keys("M-x").typ("rust-mode").keys("RET");
+    assert_eq!(x.ed.major_mode(), "rust-mode");
+    x.keys("M-x");
+    let p = x.ed.picker.as_ref().unwrap();
+    assert_eq!(p.selected_candidate().unwrap().label, "rust-mode");
+    assert!(p.selected_candidate().unwrap().current);
+    // No match: the picker stays open.
+    x.typ("zzzzqqq").keys("RET");
+    assert!(x.ed.picker.is_some());
+    x.keys("C-g");
+    assert!(x.ed.picker.is_none());
 }

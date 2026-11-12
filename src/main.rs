@@ -3,11 +3,12 @@
 mod ui;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{App, Application, Bounds, Focusable, WindowBounds, WindowOptions, prelude::*, px, size};
 
-use emax::engine::{Buffer, Config, Editor, config};
+use emax::engine::{Buffer, Config, Editor, config, session};
 
 const SCRATCH: &str = ";; This buffer is for text that is not saved.
 ;; emax — GPU-rendered, rope-backed, Emacs keys. Option is Meta, Cmd is Super.
@@ -27,6 +28,8 @@ const SCRATCH: &str = ";; This buffer is for text that is not saved.
 ;; Buffers    C-x b  switch (fuzzy, live preview; C-j create, C-k kill)
 ;;            C-x C-b  same   C-x <left>/<right> cycle   C-x k kill
 ;; Files      C-x C-s save   C-x C-c quit
+;; Commands   M-x  run any command by name (fuzzy), e.g. rust-mode, auto-fill-mode
+;; Modes      C-x C-q read-only   <insert> overwrite   M-x <mode> to switch or toggle
 ;;
 ;; Run `emax <file>...` to open files.
 
@@ -43,6 +46,10 @@ fn main() {
     if args.first().map(String::as_str) == Some("--print-default-config") {
         print!("{}", config::DEFAULT_JSON);
         return;
+    }
+    // The session daemon that keeps terminal processes alive across editor runs.
+    if args.first().map(String::as_str) == Some("--pty-daemon") {
+        std::process::exit(session::daemon::main(&args[1..]));
     }
     let paths: Vec<PathBuf> = args.iter().map(PathBuf::from).collect();
     let t_open = Instant::now();
@@ -67,7 +74,10 @@ fn main() {
             ed.add_buffer(open(p));
         }
     }
-    ed.apply_settings(&config.settings);
+    ed.set_modes(Arc::new(config.modes));
+    ed.set_terminal_config(Arc::new(config.terminal));
+    let session_file = session::state_dir(config.session.state_dir.as_deref()).map(|d| session::session_file_path(&d));
+    ed.session_config = config.session;
     let lines: usize = ed.rope().len_lines();
     ed.message = Some(match config.warnings.as_slice() {
         [] => format!(
@@ -81,6 +91,10 @@ fn main() {
         [w] => format!("Config problem (entry skipped): {w}"),
         [w, rest @ ..] => format!("Config problem (entry skipped): {w} — and {} more, see stderr", rest.len()),
     });
+    // The last session comes back when no files were named, and is saved on quit.
+    if let Some(e) = ed.startup_session(session_file, !paths.is_empty(), !config.warnings.is_empty()) {
+        eprintln!("emax: session: {e}");
+    }
     let keymaps = config.keymaps;
     let appearance = config.appearance;
 

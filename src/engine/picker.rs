@@ -1,6 +1,18 @@
 //! A generic "completing read" picker: a query, a list of candidates, fuzzy
 //! filtering with match positions (for highlighting) and a selection.
-//! Used by switch-to-buffer now; M-x and find-file can reuse it.
+//! Used by switch-to-buffer and M-x.
+
+use super::editor::Args;
+
+/// What the picker is choosing.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum PickerKind {
+    /// A buffer (`Candidate::id` is the buffer id).
+    #[default]
+    Buffers,
+    /// A command to run with `args` (`Candidate::id` indexes `names`).
+    Commands { names: Vec<&'static str>, args: Args },
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Candidate {
@@ -25,6 +37,7 @@ pub struct Match {
 }
 
 pub struct Picker {
+    pub kind: PickerKind,
     pub prompt: String,
     pub query: String,
     pub candidates: Vec<Candidate>,
@@ -38,6 +51,7 @@ pub struct Picker {
 impl Picker {
     pub fn new(prompt: &str, candidates: Vec<Candidate>) -> Self {
         let mut p = Self {
+            kind: PickerKind::Buffers,
             prompt: prompt.into(),
             query: String::new(),
             candidates,
@@ -48,6 +62,11 @@ impl Picker {
         };
         p.refilter();
         p
+    }
+
+    pub fn with_kind(mut self, kind: PickerKind) -> Self {
+        self.kind = kind;
+        self
     }
 
     pub fn set_candidates(&mut self, candidates: Vec<Candidate>) {
