@@ -1,22 +1,30 @@
 //! GPUI view: renders the editor (virtualised lines, regions, multiple cursors,
 //! mode line, echo area, the buffer picker overlay, the swiper search panel)
 //! and translates platform
-//! key events into Emacs keys.
+//! key events into Emacs keys. Also runs the editor's ticks: when a PTY
+//! backend has output (it calls the waker from its own thread) and when the
+//! next hook timer is due.
+
+mod term_view;
 
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
+
+use futures::StreamExt;
 
 use gpui::{
     AnyElement, App, ClipboardItem, Context, FocusHandle, Focusable, FontWeight, HighlightStyle, KeyDownEvent,
-    Keystroke, Pixels, Point, SharedString, StyledText, UniformListScrollHandle, Window, div,
+    Keystroke, Pixels, Point, SharedString, StyledText, Task, UniformListScrollHandle, Window, div,
     point, prelude::*, px, rgba, uniform_list,
 };
 
 use emax::engine::picker::{Picker, PickerKind};
 use emax::engine::{Swiper, SwiperExit};
+use emax::engine::term::Palette;
 use emax::engine::{Appearance, Args, BufView, Dispatcher, Editor, Key, Keymap, Keymaps, Outcome, Scroll, Theme, text};
 
 // ------------------------------------------------------------------ layout
@@ -55,11 +63,30 @@ pub struct EmaxView {
     appearance: Appearance,
     /// Whether the window has a dark appearance (picks the dark theme).
     dark: bool,
+    /// Wakes the view when the next hook timer is due (dropping it cancels).
+    timer_task: Option<Task<()>>,
+    /// The deadline `timer_task` waits for.
+    timer_deadline: Option<Instant>,
 }
 
 impl EmaxView {
-    pub fn new(ed: Editor, keymaps: Keymaps, appearance: Appearance, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(mut ed: Editor, keymaps: Keymaps, appearance: Appearance, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let echo = ed.message.clone().map(SharedString::from);
+        // PTY backends call the waker from their threads; the view ticks the
+        // editor on its own thread when it fires (wake-ups coalesce).
+        let (wake_tx, mut wake_rx) = futures::channel::mpsc::unbounded::<()>();
+        ed.set_waker(Arc::new(move || {
+            let _ = wake_tx.unbounded_send(());
+        }));
+        cx.spawn(async move |this, cx| {
+            while wake_rx.next().await.is_some() {
+                while wake_rx.try_recv().is_ok() {}
+                if this.update(cx, |view, cx| view.tick(cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         // Follow the system's light/dark switch while running.
         cx.observe_window_appearance(window, |this, window, cx| {
             this.dark = is_dark(window.appearance());
@@ -81,7 +108,42 @@ impl EmaxView {
             swiper_scroll: None,
             appearance,
             dark: is_dark(window.appearance()),
+            timer_task: None,
+            timer_deadline: None,
         }
+    }
+
+    /// Let the editor read terminal output, fire due timers and run hooks;
+    /// redraw if anything happened.
+    fn tick(&mut self, cx: &mut Context<Self>) {
+        if self.ed.tick(Instant::now()) {
+            if let Some(m) = self.ed.message.clone() {
+                self.echo = Some(m.into());
+            }
+            if self.ed.quit_requested {
+                cx.quit();
+            }
+            cx.notify();
+        }
+        self.schedule_timer(cx);
+    }
+
+    /// Make sure the view ticks when the editor's next timer is due.
+    fn schedule_timer(&mut self, cx: &mut Context<Self>) {
+        let next = self.ed.hooks.next_deadline();
+        if next == self.timer_deadline {
+            return;
+        }
+        self.timer_deadline = next;
+        self.timer_task = next.map(|due| {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(due.saturating_duration_since(Instant::now())).await;
+                let _ = this.update(cx, |view, cx| {
+                    view.timer_deadline = None;
+                    view.tick(cx);
+                });
+            })
+        });
     }
 
     fn theme(&self) -> &Theme {
@@ -134,8 +196,17 @@ impl EmaxView {
             return;
         }
 
+        // Terminal buffers in char mode take most keys themselves.
+        if !self.keys.is_pending() && self.ed.terminal_key(&key) {
+            self.echo = None;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+
         let outcome = self.keys.dispatch(&key, &self.ed.active_keymaps());
         self.outcome(outcome, cx);
+        self.schedule_timer(cx);
         cx.stop_propagation();
         cx.notify();
     }
@@ -149,7 +220,7 @@ impl EmaxView {
     }
 
     fn run_command(&mut self, cmd: &'static str, args: Args, cx: &mut Context<Self>) {
-                if cmd == "yank" {
+                if matches!(cmd, "yank" | "term-paste") {
                     // interprogram-paste: pick up text copied in other apps.
                     if let Some(t) = cx.read_from_clipboard().and_then(|c| c.text()) {
                         self.ed.clipboard_in(t);
@@ -872,6 +943,24 @@ impl Render for EmaxView {
             .text_color(rgba(t.foreground))
             .child(self.echo.clone().unwrap_or_default());
 
+        // A terminal buffer shows its screen instead of the text list.
+        let body = match self.ed.terminal_snapshot(view_id, &Palette::from_theme(&t)) {
+            Some(_) => {
+                let chrome = 2.0 * lh + f32::from(self.ui(6.0)) + f32::from(self.ui(8.0));
+                let size = window.viewport_size();
+                let (cols, rows) = term_view::grid_size(
+                    f32::from(size.width),
+                    f32::from(size.height) - chrome,
+                    term_view::cell_width(fonts.size),
+                    lh,
+                );
+                self.ed.resize_terminal(view_id, cols, rows);
+                let snap = self.ed.terminal_snapshot(view_id, &Palette::from_theme(&t));
+                div().flex_1().min_h_0().children(snap.map(|s| term_view::render_terminal(&s, lh))).into_any_element()
+            }
+            None => list.into_any_element(),
+        };
+
         let picker = self.ed.picker.as_ref().map(|p| self.render_picker(p, cx));
         let search = self.ed.swiper.as_ref().map(|s| self.render_swiper(s, gutter_w, cx));
 
@@ -887,7 +976,7 @@ impl Render for EmaxView {
             .font_family(fonts.family)
             .text_size(px(fonts.size))
             .line_height(px(lh))
-            .child(list)
+            .child(body)
             .children(search)
             .child(modeline)
             .child(echo)

@@ -25,11 +25,17 @@
 //! `font`, `theme` and `themes` set the look (see [`super::theme`]); a user
 //! theme entry is merged color by color into the theme of the same name.
 //!
+//! `terminal` configures terminal buffers and the PTY backend, `session`
+//! session persistence (both merged field by field). The `terminal` keymap
+//! holds the keys of terminal buffers (sequences starting with one of
+//! `terminal.escape_keys` in char mode; any key in copy mode).
+//!
 //! Problems (bad JSON, unknown commands, malformed keys) never stop the
 //! editor: the offending entry is skipped and reported in `warnings`.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 
 use serde::Deserialize;
 
@@ -44,7 +50,7 @@ use super::theme::{self, DEFAULT_THEME, Fonts, RawThemes, Theme, Themes};
 pub const DEFAULT_JSON: &str = include_str!("../../config/default.json");
 
 /// The keymaps a configuration can define.
-pub const KEYMAP_NAMES: [&str; 3] = ["global", "picker", "search"];
+pub const KEYMAP_NAMES: [&str; 4] = ["global", "picker", "search", "terminal"];
 
 #[derive(Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
@@ -57,6 +63,37 @@ struct RawConfig {
     /// keymap name -> key sequence -> command (`null` unbinds).
     keymaps: BTreeMap<String, RawKeymap>,
     modes: RawModes,
+    terminal: RawTerminal,
+    session: RawSession,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct RawTerminal {
+    /// `null` (the default) means `$SHELL`, else `/bin/sh`.
+    #[serde(deserialize_with = "nullable")]
+    shell: Option<Option<String>>,
+    shell_args: Option<Vec<String>>,
+    term: Option<String>,
+    scrollback_lines: Option<usize>,
+    backend: Option<String>,
+    replay_bytes: Option<usize>,
+    #[serde(deserialize_with = "nullable")]
+    socket: Option<Option<PathBuf>>,
+    escape_keys: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct RawSession {
+    restore_session: Option<bool>,
+    #[serde(deserialize_with = "nullable")]
+    state_dir: Option<Option<PathBuf>>,
+}
+
+/// A field that may be absent (`None`), `null` (`Some(None)`) or set.
+fn nullable<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<Option<T>>, D::Error> {
+    Option::<T>::deserialize(d).map(Some)
 }
 
 type RawKeymap = BTreeMap<String, Option<String>>;
@@ -145,6 +182,83 @@ impl Default for Settings {
     }
 }
 
+/// Where terminal processes run.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PtyBackendKind {
+    /// In the session daemon: they survive the editor (started when needed).
+    #[default]
+    Daemon,
+    /// As children of the editor.
+    Local,
+}
+
+/// The `terminal` section, and the `terminal` keymap.
+pub struct TerminalConfig {
+    /// The program `term` runs (`None`: `$SHELL`, else `/bin/sh`).
+    pub shell: Option<String>,
+    pub shell_args: Vec<String>,
+    /// `TERM` for terminal programs.
+    pub term: String,
+    /// History kept per terminal, in lines.
+    pub scrollback_lines: usize,
+    pub backend: PtyBackendKind,
+    /// Output the daemon keeps per session to replay on attach, in bytes.
+    pub replay_bytes: usize,
+    /// The daemon's socket (`None`: `session::default_socket_path`).
+    pub socket: Option<PathBuf>,
+    /// Keys that start an editor key sequence in char mode (canonical form).
+    pub escape_keys: Vec<String>,
+    /// Bindings for terminal buffers, looked up before the other keymaps.
+    pub keymap: Keymap,
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            shell: None,
+            shell_args: Vec::new(),
+            term: "xterm-256color".into(),
+            scrollback_lines: 10_000,
+            backend: PtyBackendKind::Daemon,
+            replay_bytes: 2 << 20,
+            socket: None,
+            escape_keys: vec!["C-x".into(), "M-x".into(), "C-c".into()],
+            keymap: Keymap::new(),
+        }
+    }
+}
+
+impl TerminalConfig {
+    /// The terminal configuration of the built-in configuration (shared, built once).
+    pub fn builtin() -> Arc<TerminalConfig> {
+        static BUILTIN: OnceLock<Arc<TerminalConfig>> = OnceLock::new();
+        BUILTIN.get_or_init(|| Arc::new(Config::builtin().terminal)).clone()
+    }
+
+    /// The program `term` runs: `shell`, else `$SHELL`, else `/bin/sh`.
+    pub fn shell_program(&self) -> String {
+        self.shell
+            .clone()
+            .or_else(|| std::env::var("SHELL").ok().filter(|s| !s.is_empty()))
+            .unwrap_or_else(|| "/bin/sh".into())
+    }
+}
+
+/// The `session` section.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionConfig {
+    /// Save tabs, windows and buffers on quit and restore them on start.
+    pub restore_session: bool,
+    /// Where the session file lives (`None`: see `session::state_dir`).
+    pub state_dir: Option<PathBuf>,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self { restore_session: true, state_dir: None }
+    }
+}
+
 /// The keymaps of the panels. The global keymap and the modes' keymaps are
 /// in [`Modes`].
 pub struct Keymaps {
@@ -173,6 +287,8 @@ pub struct Config {
     pub modes: Modes,
     pub appearance: Appearance,
     pub keymaps: Keymaps,
+    pub terminal: TerminalConfig,
+    pub session: SessionConfig,
     /// The user file that was loaded, if any.
     pub user_file: Option<PathBuf>,
     /// Everything that was wrong with the configuration (each entry skipped).
@@ -215,6 +331,8 @@ impl Config {
         let mut maps: BTreeMap<&'static str, BTreeMap<String, String>> =
             KEYMAP_NAMES.iter().map(|n| (*n, BTreeMap::new())).collect();
         let mut modes_acc = ModesAcc::default();
+        let mut terminal = TerminalConfig::default();
+        let mut session = SessionConfig::default();
 
         for (label, text) in layers {
             let raw: RawConfig = match serde_json::from_str(text) {
@@ -266,6 +384,13 @@ impl Config {
                 merge_keymap(map, entries, &format!("{label}: keymaps.{name}"), &mut warnings);
             }
             merge_modes(&mut modes_acc, raw.modes, label, &mut warnings);
+            merge_terminal(&mut terminal, raw.terminal, label, &mut warnings);
+            if let Some(v) = raw.session.restore_session {
+                session.restore_session = v;
+            }
+            if let Some(v) = raw.session.state_dir {
+                session.state_dir = v;
+            }
         }
 
         let keymaps = Keymaps {
@@ -273,6 +398,7 @@ impl Config {
             search: build_keymap("keymaps.search", &maps["search"], &|a| SEARCH_ACTIONS.iter().find(|x| **x == a).copied(), true, &mut warnings),
         };
         let modes = build_modes(modes_acc, settings, &maps["global"], &mut warnings);
+        terminal.keymap = build_keymap("keymaps.terminal", &maps["terminal"], &resolve_global, false, &mut warnings);
         let fallback = builtin_default_theme();
         let mut pick = |name: &str| {
             theme::resolve(name, &raw_themes, &fallback, &mut warnings).unwrap_or_else(|| {
@@ -291,7 +417,56 @@ impl Config {
             RawThemeChoice::ByAppearance { light, dark } => Themes { light: pick(&light), dark: pick(&dark) },
         };
         let appearance = Appearance { fonts: Fonts::new(&family, &ui_family, size, line_height), themes };
-        Self { modes, appearance, keymaps, user_file: None, warnings }
+        Self { modes, appearance, keymaps, terminal, session, user_file: None, warnings }
+    }
+}
+
+/// Merge one layer's `terminal` section.
+fn merge_terminal(t: &mut TerminalConfig, raw: RawTerminal, label: &str, warnings: &mut Vec<String>) {
+    let ctx = format!("{label}: terminal");
+    if let Some(v) = raw.shell {
+        t.shell = v.filter(|s| !s.trim().is_empty());
+    }
+    if let Some(v) = raw.shell_args {
+        t.shell_args = v;
+    }
+    match raw.term {
+        Some(v) if v.trim().is_empty() => warnings.push(format!("{ctx}.term is empty")),
+        Some(v) => t.term = v,
+        None => {}
+    }
+    if let Some(v) = raw.scrollback_lines {
+        t.scrollback_lines = v;
+    }
+    match raw.backend.as_deref() {
+        Some("daemon") => t.backend = PtyBackendKind::Daemon,
+        Some("local") => t.backend = PtyBackendKind::Local,
+        Some(other) => warnings.push(format!("{ctx}.backend: \"{other}\" (expected \"daemon\" or \"local\")")),
+        None => {}
+    }
+    match raw.replay_bytes {
+        Some(v) if v > 256 << 20 => warnings.push(format!("{ctx}.replay_bytes must be at most 268435456")),
+        Some(v) => t.replay_bytes = v,
+        None => {}
+    }
+    if let Some(v) = raw.socket {
+        t.socket = v;
+    }
+    if let Some(keys) = raw.escape_keys {
+        t.escape_keys = keys
+            .iter()
+            .filter_map(|k| match normalize_keys(k) {
+                Ok(n) if !n.contains(' ') => Some(n),
+                Ok(_) => {
+                    warnings.push(format!("{ctx}.escape_keys: \"{k}\": only single keys can be escape keys"));
+                    None
+                }
+                Err(e) => {
+                    warnings.push(format!("{ctx}.escape_keys: {e}"));
+                    None
+                }
+            })
+            .collect();
     }
 }
 
@@ -555,6 +730,51 @@ mod tests {
         assert_eq!(c.modes.global.lookup(&["C-x".into(), "C-s".into()]), Some("save-buffer"));
         assert_eq!(c.keymaps.picker.lookup(&["RET".into()]), Some("picker-accept"));
         assert_eq!(c.keymaps.search.lookup(&["C-s".into()]), Some("search-next-or-history"));
+        let t = &c.terminal;
+        assert_eq!(t.escape_keys, ["C-x", "M-x", "C-c"]);
+        assert_eq!((t.backend, t.scrollback_lines, t.replay_bytes), (PtyBackendKind::Daemon, 10_000, 2 << 20));
+        assert_eq!((t.shell.as_deref(), t.term.as_str(), t.socket.as_deref()), (None, "xterm-256color", None));
+        assert_eq!(t.keymap.lookup(&["C-c".into(), "C-j".into()]), Some("term-copy-mode"));
+        assert_eq!(c.session, SessionConfig { restore_session: true, state_dir: None });
+    }
+
+    #[test]
+    fn terminal_and_session_sections() {
+        let user = r#"{
+            "terminal": { "shell": "/bin/zsh", "shell_args": ["-l"], "backend": "local", "scrollback_lines": 500,
+                          "escape_keys": ["C-x", "M-C-z"], "socket": "/tmp/s.sock" },
+            "session": { "restore_session": false, "state_dir": "/tmp/state" },
+            "keymaps": { "terminal": { "C-c C-j": null, "C-c j": "term-copy-mode" } }
+        }"#;
+        let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", user)]);
+        assert!(c.warnings.is_empty(), "{:#?}", c.warnings);
+        let t = &c.terminal;
+        assert_eq!(t.shell_program(), "/bin/zsh");
+        assert_eq!(t.shell_args, ["-l"]);
+        assert_eq!(t.backend, PtyBackendKind::Local);
+        assert_eq!(t.scrollback_lines, 500);
+        assert_eq!(t.replay_bytes, 2 << 20); // untouched default
+        assert_eq!(t.escape_keys, ["C-x", "C-M-z"]);
+        assert_eq!(t.socket.as_deref(), Some(std::path::Path::new("/tmp/s.sock")));
+        assert_eq!(t.keymap.lookup(&["C-c".into(), "C-j".into()]), None);
+        assert_eq!(t.keymap.lookup(&["C-c".into(), "j".into()]), Some("term-copy-mode"));
+        assert_eq!(c.session, SessionConfig { restore_session: false, state_dir: Some("/tmp/state".into()) });
+
+        // `null` goes back to the default.
+        let reset = Config::from_layers(&[("built-in", DEFAULT_JSON), ("a", user), ("b", r#"{"terminal": {"shell": null, "socket": null}}"#)]);
+        assert_eq!(reset.terminal.shell, None);
+        assert_eq!(reset.terminal.socket, None);
+
+        let bad = r#"{ "terminal": { "backend": "ssh", "escape_keys": ["C-x C-y", "Ctrl-q"], "term": "", "replay_bytes": 999999999999 } }"#;
+        let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", bad)]);
+        let w = c.warnings.join("\n");
+        assert!(w.contains("terminal.backend"), "{w}");
+        assert!(w.contains("only single keys can be escape keys"), "{w}");
+        assert!(w.contains("\"Ctrl-q\" is not a key"), "{w}");
+        assert!(w.contains("terminal.term is empty"), "{w}");
+        assert!(w.contains("replay_bytes"), "{w}");
+        assert_eq!(c.terminal.backend, PtyBackendKind::Daemon);
+        assert!(c.terminal.escape_keys.is_empty());
     }
 
     #[test]

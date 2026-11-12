@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use gpui::{App, Application, Bounds, Focusable, WindowBounds, WindowOptions, prelude::*, px, size};
 
-use emax::engine::{Buffer, Config, Editor, config};
+use emax::engine::{Buffer, Config, Editor, config, session};
 
 const SCRATCH: &str = ";; This buffer is for text that is not saved.
 ;; emax — GPU-rendered, rope-backed, Emacs keys. Option is Meta, Cmd is Super.
@@ -47,6 +47,10 @@ fn main() {
         print!("{}", config::DEFAULT_JSON);
         return;
     }
+    // The session daemon that keeps terminal processes alive across editor runs.
+    if args.first().map(String::as_str) == Some("--pty-daemon") {
+        std::process::exit(session::daemon::main(&args[1..]));
+    }
     let paths: Vec<PathBuf> = args.iter().map(PathBuf::from).collect();
     let t_open = Instant::now();
     let config = Config::load();
@@ -71,6 +75,8 @@ fn main() {
         }
     }
     ed.set_modes(Arc::new(config.modes));
+    ed.set_terminal_config(Arc::new(config.terminal));
+    ed.session_config = config.session;
     let lines: usize = ed.rope().len_lines();
     ed.message = Some(match config.warnings.as_slice() {
         [] => format!(

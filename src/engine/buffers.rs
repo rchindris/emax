@@ -3,9 +3,10 @@
 //! its own cursors. Also the picker's actions, for switch-to-buffer and M-x.
 
 use super::buffer::Buffer;
-use super::commands::{self, COMMANDS};
+use super::commands;
 use super::cursor::Cursor;
 use super::editor::{Args, Editor, RawArg, Scroll};
+use super::hooks::Event;
 use super::keymap::{Key, Keymap, where_is};
 use super::picker::{Candidate, Picker, PickerKind};
 
@@ -64,6 +65,7 @@ impl Editor {
         let id = self.next_buf_id;
         self.next_buf_id += 1;
         self.others.insert(0, BufferSlot { id, buf, cursors: vec![Cursor::new(1, 0)], primary: 1, next_cursor_id: 2 });
+        self.emit(Event::BufferCreated { buf: id });
         id
     }
 
@@ -97,6 +99,7 @@ impl Editor {
         }
         self.scroll = Scroll::Keep;
         self.last_command = "";
+        self.sync_selected_window();
         true
     }
 
@@ -122,17 +125,30 @@ impl Editor {
 
     /// Kill buffer `id`. Killing the current buffer shows the most recent other
     /// one (or a fresh *scratch* if it was the last).
+    ///
+    /// Windows showing it show the buffer that replaces it in the selected
+    /// window; a terminal buffer's process is killed; `BufferKilled` is emitted.
     pub fn kill_buffer(&mut self, id: u64) {
-        if id != self.buf_id {
-            self.others.retain(|s| s.id != id);
-            return;
+        let name = if id == self.buf_id {
+            self.buf.name.clone()
+        } else {
+            match self.others.iter().find(|s| s.id == id) {
+                Some(s) => s.buf.name.clone(),
+                None => return,
+            }
+        };
+        if id == self.buf_id {
+            if self.others.is_empty() {
+                self.add_buffer(Buffer::from_str("*scratch*", ""));
+            }
+            let next = self.others[0].id;
+            self.switch_to_buffer(next);
         }
-        if self.others.is_empty() {
-            self.add_buffer(Buffer::from_str("*scratch*", ""));
-        }
-        let next = self.others[0].id;
-        self.switch_to_buffer(next);
         self.others.retain(|s| s.id != id);
+        let replacement = self.buf_id;
+        self.layout.replace_buffer(id, replacement);
+        self.terminal_buffer_killed(id);
+        self.emit(Event::BufferKilled { buf: id, name });
     }
 
     pub fn find_buffer(&self, id: u64) -> Option<BufView<'_>> {
@@ -203,8 +219,7 @@ impl Editor {
     /// Every command M-x offers: the ones used from M-x before (most recent
     /// first), then the rest alphabetically.
     fn command_names(&self) -> Vec<&'static str> {
-        let mut all: Vec<&'static str> = COMMANDS
-            .iter()
+        let mut all: Vec<&'static str> = commands::all()
             .map(|c| c.name)
             .filter(|n| !matches!(*n, "self-insert-command" | "execute-extended-command"))
             .chain(self.modes.major_names())

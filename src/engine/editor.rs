@@ -1,14 +1,23 @@
 //! The editor state that commands operate on: one buffer, one or more cursors,
 //! the kill ring, and per-command bookkeeping (undo groups, kill appending,
-//! transient-mark deactivation, shift-selection).
+//! transient-mark deactivation, shift-selection). Also the hooks, the window
+//! layout, the terminal buffers' state and the PTY backend.
 
+use std::collections::HashMap;
+use std::io;
 use std::ops::Range;
 use std::sync::Arc;
 
 use ropey::Rope;
 
-use super::buffer::Buffer;
+use super::buffer::{Buffer, BufferId};
 use super::buffers::BufferSlot;
+use super::config::{PtyBackendKind, SessionConfig, TerminalConfig};
+use super::hooks::{Event, Hooks};
+use super::pty::{PtyBackend, Waker, local::LocalBackend, noop_waker};
+use super::session::client::DaemonBackend;
+use super::term::buffer::TermState;
+use super::window::Layout;
 use super::picker::Picker;
 use super::search::Swiper;
 use super::commands::{self, flags, Command};
@@ -109,6 +118,19 @@ pub struct Editor {
     pub reveal: Option<usize>,
     pub recenter_step: usize,
     pub quit_requested: bool,
+
+    /// Hook handlers, the event queue and timers (see `hooks.rs`).
+    pub hooks: Hooks,
+    /// Tabs and windows (see `window.rs`). The selected window shows `buf`.
+    pub layout: Layout,
+    /// The terminal side of each terminal buffer, by buffer id.
+    pub terminals: HashMap<BufferId, TermState>,
+    /// Runs terminal processes; created on first use (see `pty_backend`).
+    pub(crate) pty: Option<Box<dyn PtyBackend>>,
+    /// Given to the PTY backend: wakes the UI when output arrives.
+    pub(crate) waker: Waker,
+    pub terminal_config: Arc<TerminalConfig>,
+    pub session_config: SessionConfig,
 }
 
 impl Editor {
@@ -117,6 +139,8 @@ impl Editor {
     pub fn new(mut buf: Buffer) -> Self {
         let modes = Modes::builtin();
         buf.modes = modes.initial(&buf);
+        let mut hooks = Hooks::new();
+        hooks.push(Event::BufferCreated { buf: 1 });
         Self {
             buf,
             cursors: vec![Cursor::new(1, 0)],
@@ -147,7 +171,61 @@ impl Editor {
             reveal: None,
             recenter_step: 0,
             quit_requested: false,
+            hooks,
+            layout: Layout::new(1),
+            terminals: HashMap::new(),
+            pty: None,
+            waker: noop_waker(),
+            terminal_config: TerminalConfig::builtin(),
+            session_config: SessionConfig::default(),
         }
+    }
+
+    // ------------------------------------------------------- integration
+
+    /// The UI's wake-up function: backends created from now on call it when
+    /// terminal output arrives.
+    pub fn set_waker(&mut self, waker: Waker) {
+        self.waker = waker;
+    }
+
+    /// Use `backend` for terminal processes (tests use `pty::mock`).
+    pub fn set_pty_backend(&mut self, backend: Box<dyn PtyBackend>) {
+        self.pty = Some(backend);
+    }
+
+    /// The PTY backend, created on first use as `terminal.backend` says. If
+    /// the daemon can't be reached or started, falls back to running
+    /// processes locally (they then end with the editor) and says so.
+    pub fn pty_backend(&mut self) -> io::Result<&mut (dyn PtyBackend + 'static)> {
+        if self.pty.is_none() {
+            let cfg = self.terminal_config.clone();
+            let waker = self.waker.clone();
+            let backend: Box<dyn PtyBackend> = match cfg.backend {
+                PtyBackendKind::Local => Box::new(LocalBackend::new(waker)),
+                PtyBackendKind::Daemon => {
+                    let socket = cfg.socket.clone().unwrap_or_else(super::session::default_socket_path);
+                    match DaemonBackend::connect_or_start(&socket, cfg.replay_bytes, waker.clone()) {
+                        Ok(b) => Box::new(b),
+                        Err(e) => {
+                            self.message = Some(format!("Session daemon unavailable ({e}); terminals will end with the editor"));
+                            Box::new(LocalBackend::new(waker))
+                        }
+                    }
+                }
+            };
+            self.pty = Some(backend);
+        }
+        Ok(self.pty.as_deref_mut().expect("backend was just created"))
+    }
+
+    /// The backend, if one has been created.
+    pub fn pty_backend_if_running(&mut self) -> Option<&mut (dyn PtyBackend + 'static)> {
+        self.pty.as_deref_mut()
+    }
+
+    pub fn set_terminal_config(&mut self, cfg: Arc<TerminalConfig>) {
+        self.terminal_config = cfg;
     }
 
     // ------------------------------------------------------------- accessors
@@ -215,6 +293,7 @@ impl Editor {
         for c in &mut self.cursors {
             c.adjust(range.start, range.end, inserted);
         }
+        self.layout.adjust_for_edit(self.buf_id, range.start, range.end, inserted);
         old
     }
 
@@ -352,7 +431,14 @@ impl Editor {
         format!("Buffer is read-only: {}", self.buf.name)
     }
 
+    /// Run `cmd`, then emit `AfterCommand` and handle queued hook events.
     pub fn run(&mut self, cmd: &Command, args: Args) {
+        self.run_command(cmd, args);
+        self.emit(Event::AfterCommand { name: cmd.name.to_string() });
+        self.run_hooks();
+    }
+
+    fn run_command(&mut self, cmd: &Command, args: Args) {
         self.this_command = cmd.name;
         self.message = None;
         self.reveal = None;

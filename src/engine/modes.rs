@@ -428,9 +428,14 @@ impl Editor {
         self.modes.tab_width(&buf.modes)
     }
 
-    /// The current buffer's keymaps, highest priority first.
+    /// The current buffer's keymaps, highest priority first (a terminal
+    /// buffer's `terminal` keymap before its modes').
     pub fn active_keymaps(&self) -> Vec<&Keymap> {
-        self.modes.keymaps(&self.buf.modes)
+        let mut maps = self.modes.keymaps(&self.buf.modes);
+        if self.buf.kind == super::buffer::BufferKind::Terminal {
+            maps.insert(0, &self.terminal_config.keymap);
+        }
+        maps
     }
 
     /// Mode-line text for a buffer's modes, e.g. `Rust Fill`.

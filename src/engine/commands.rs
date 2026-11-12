@@ -1,6 +1,10 @@
 //! Interactive commands, named after their GNU Emacs counterparts. Every
 //! command runs on all cursors. `lookup` finds a command by name (for keymaps
-//! and, later, M-x).
+//! and M-x).
+//!
+//! Subsystems keep their own command tables next to their code (windows,
+//! terminal buffers, ...); [`TABLES`] lists them all, so adding a command
+//! never needs an edit here.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -163,10 +167,19 @@ commands! {
     "electric-pair-mode" => electric_pair_mode, NO_UNDO, "Toggle inserting closing brackets and quotes (with N: on if N > 0).";
 }
 
+/// Every built-in command table: the editing commands here, then each
+/// subsystem's.
+pub static TABLES: &[&[Command]] = &[COMMANDS, super::window::COMMANDS, super::term::buffer::COMMANDS];
+
+/// Every built-in command (major mode commands come from the configuration).
+pub fn all() -> impl Iterator<Item = &'static Command> {
+    TABLES.iter().flat_map(|t| t.iter())
+}
+
 pub fn lookup(name: &str) -> Option<&'static Command> {
     static INDEX: OnceLock<HashMap<&'static str, &'static Command>> = OnceLock::new();
     INDEX
-        .get_or_init(|| COMMANDS.iter().map(|c| (c.name, c)).collect())
+        .get_or_init(|| all().map(|c| (c.name, c)).collect())
         .get(name)
         .copied()
 }
@@ -1506,6 +1519,7 @@ fn quit(ed: &mut Editor, _: &Args) -> CmdResult {
         return err("Buffer modified; save it first, or repeat the command to quit without saving");
     }
     ed.quit_requested = true;
+    ed.emit(super::hooks::Event::KillEmacs);
     Ok(())
 }
 

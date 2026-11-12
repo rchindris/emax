@@ -30,8 +30,23 @@ struct Group {
     count: usize,
 }
 
+/// Identifies a buffer for as long as the editor runs.
+pub type BufferId = u64;
+
+/// What a buffer holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BufferKind {
+    /// Text (a file, *scratch*...).
+    #[default]
+    Text,
+    /// A terminal: its screen is in `Editor.terminals`; the rope holds the
+    /// text copy only in copy mode.
+    Terminal,
+}
+
 pub struct Buffer {
     pub rope: Rope,
+    pub kind: BufferKind,
     pub path: Option<PathBuf>,
     pub name: String,
     /// Major and minor modes, buffer-local settings (set by the editor).
@@ -49,6 +64,7 @@ impl Buffer {
     pub fn from_str(name: &str, text: &str) -> Self {
         Self {
             rope: Rope::from_str(text),
+            kind: BufferKind::Text,
             path: None,
             name: name.into(),
             modes: BufferModes::default(),
