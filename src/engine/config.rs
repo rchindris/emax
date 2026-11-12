@@ -787,6 +787,22 @@ mod tests {
     }
 
     #[test]
+    fn daemon_idle_exit() {
+        use std::time::Duration;
+        assert_eq!(Config::builtin().terminal.daemon_idle_exit, Some(Duration::from_secs(60)));
+        let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", r#"{"terminal": {"daemon_idle_exit": 5}}"#)]);
+        assert!(c.warnings.is_empty(), "{:#?}", c.warnings);
+        assert_eq!(c.terminal.daemon_idle_exit, Some(Duration::from_secs(5)));
+        // 0: never exit.
+        let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", r#"{"terminal": {"daemon_idle_exit": 0}}"#)]);
+        assert_eq!(c.terminal.daemon_idle_exit, None);
+        // Not a number of seconds: the layer is reported.
+        let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", r#"{"terminal": {"daemon_idle_exit": -3}}"#)]);
+        assert!(!c.warnings.is_empty());
+        assert_eq!(c.terminal.daemon_idle_exit, Some(Duration::from_secs(60)));
+    }
+
+    #[test]
     fn every_action_has_a_default_key() {
         let c = Config::builtin();
         for a in PICKER_ACTIONS {

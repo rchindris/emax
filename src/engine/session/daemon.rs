@@ -142,7 +142,7 @@ pub fn bind(path: &Path) -> io::Result<Bound> {
     let lock = take_lock(&path.with_extension("lock"))?;
     match fs::symlink_metadata(path) {
         Ok(m) if m.file_type().is_socket() => {
-            if UnixStream::connect(path).is_ok() {
+            if is_live(path) {
                 return Err(io::Error::new(io::ErrorKind::AddrInUse, format!("a daemon is already listening on {}", path.display())));
             }
             // Nobody listens: left behind by a daemon that died.
@@ -157,6 +157,22 @@ pub fn bind(path: &Path) -> io::Result<Bound> {
     let listener = UnixListener::bind(path)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     Ok(Bound { listener, path: path.to_path_buf(), _lock: lock })
+}
+
+/// Whether something listens on the socket at `path`. Asked a few times:
+/// a dead daemon's listening socket can linger for a moment in a process
+/// that has forked but not yet exec'd (descriptors close on exec), and since
+/// we hold the lock, no other daemon can be serving it.
+fn is_live(path: &Path) -> bool {
+    for attempt in 0..5 {
+        if UnixStream::connect(path).is_err() {
+            return false;
+        }
+        if attempt < 4 {
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+    true
 }
 
 /// Create `dir` private to this user, or check that an existing one is not
@@ -679,4 +695,122 @@ fn daemonize(log: &Path) -> io::Result<()> {
         libc::dup2(out.as_raw_fd(), 2);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::pty::mock::MockBackend;
+
+    #[test]
+    fn ring_keeps_the_last_bytes() {
+        let mut r = Ring::new(10);
+        assert!(r.is_empty());
+        r.push(b"hello");
+        assert_eq!(r.chunks(100), [b"hello".to_vec()]);
+        r.push(b" world!");
+        assert_eq!(r.len(), 10);
+        assert_eq!(r.chunks(100).concat(), b"llo world!");
+        assert_eq!(r.chunks(4), [b"llo ".to_vec(), b"worl".to_vec(), b"d!".to_vec()]);
+        // Bigger than the whole ring: only the tail.
+        r.push(b"0123456789abc");
+        assert_eq!(r.chunks(100).concat(), b"3456789abc");
+        // A zero-size ring keeps nothing.
+        let mut z = Ring::new(0);
+        z.push(b"abc");
+        assert!(z.is_empty() && z.chunks(10).is_empty());
+    }
+
+    /// Compare against the obvious model over many pseudo-random pushes.
+    #[test]
+    fn ring_matches_a_naive_model() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut rand = move |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        for cap in [1, 2, 7, 64, 1000] {
+            let mut ring = Ring::new(cap);
+            let mut all = Vec::new();
+            for step in 0..300 {
+                let data: Vec<u8> = (0..rand(cap * 2 + 3)).map(|_| rand(256) as u8).collect();
+                ring.push(&data);
+                all.extend_from_slice(&data);
+                let want = &all[all.len().saturating_sub(cap)..];
+                let chunk = 1 + rand(cap + 5);
+                let got = ring.chunks(chunk);
+                assert!(got.iter().all(|c| !c.is_empty() && c.len() <= chunk), "cap {cap} step {step}");
+                assert_eq!(got.concat(), want, "cap {cap} step {step}");
+            }
+        }
+    }
+
+    fn daemon(backend: Box<dyn PtyBackend>) -> (Daemon, Receiver<Input>) {
+        let (tx, rx) = mpsc::channel();
+        let d = Daemon { backend, sessions: BTreeMap::new(), conns: HashMap::new(), replay_bytes: 100, tx, more: false, stop: false };
+        (d, rx)
+    }
+
+    fn conn(d: &mut Daemon, id: u64) -> (Arc<AtomicUsize>, Receiver<Vec<u8>>) {
+        let (tx, rx) = mpsc::channel();
+        let queued = Arc::new(AtomicUsize::new(0));
+        d.conns.insert(id, Conn { tx, queued: queued.clone(), greeted: true });
+        (queued, rx)
+    }
+
+    /// While a client is past the high-water mark, backend events stay in
+    /// the backend; they flow once it catches up.
+    #[test]
+    fn draining_pauses_while_a_client_lags() {
+        let (b, h) = MockBackend::new();
+        let (mut d, _rx) = daemon(Box::new(b));
+        let (queued, frames) = conn(&mut d, 1);
+        let Ok(Reply::Spawned(id)) = d.op(1, Op::Spawn(SpawnSpec::default())) else { panic!() };
+        h.output(id, b"abc");
+        d.more = true;
+        queued.store(HIGH_WATER, Ordering::SeqCst);
+        d.drain();
+        assert!(d.sessions[&id].ring.is_empty(), "nothing read while throttled");
+        assert!(d.more);
+        queued.store(0, Ordering::SeqCst);
+        d.drain();
+        assert_eq!(d.sessions[&id].ring.chunks(10).concat(), b"abc");
+        assert!(!d.more, "drained to the end");
+        assert_eq!(queued.load(Ordering::SeqCst), frames.try_recv().unwrap().len(), "queued bytes are counted");
+    }
+
+    /// A long backlog is drained in batches, the daemon waking itself to go on.
+    #[test]
+    fn draining_is_done_in_batches() {
+        let (b, h) = MockBackend::new();
+        let (mut d, rx) = daemon(Box::new(b));
+        let Ok(Reply::Spawned(id)) = d.op(1, Op::Spawn(SpawnSpec::default())) else { panic!() };
+        for _ in 0..DRAIN_BATCH + 5 {
+            h.output(id, b"x");
+        }
+        d.more = true;
+        d.drain();
+        assert!(matches!(rx.try_recv(), Ok(Input::Wake)), "woke itself to continue");
+        assert!(d.more);
+        d.drain();
+        assert!(!d.more);
+        assert_eq!(d.sessions[&id].ring.len(), 100); // replay_bytes
+    }
+
+    #[test]
+    fn dropping_a_connection_detaches_it_everywhere() {
+        let (b, _h) = MockBackend::new();
+        let (mut d, _rx) = daemon(Box::new(b));
+        let _c1 = conn(&mut d, 1);
+        let _c2 = conn(&mut d, 2);
+        let Ok(Reply::Spawned(a)) = d.op(1, Op::Spawn(SpawnSpec::default())) else { panic!() };
+        let Ok(Reply::Spawned(b)) = d.op(2, Op::Spawn(SpawnSpec::default())) else { panic!() };
+        d.op(1, Op::Attach { id: b, size: PtySize::default() }).unwrap();
+        d.drop_conn(1);
+        assert!(d.sessions[&a].clients.is_empty());
+        assert_eq!(d.sessions[&b].clients.iter().copied().collect::<Vec<_>>(), [2]);
+        assert_eq!(d.sessions.len(), 2, "sessions outlive their clients");
+    }
 }

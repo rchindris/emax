@@ -631,6 +631,15 @@ fn a_stalled_client_holds_output_back_without_losing_any() {
 
 // ---------------------------------------------------------- binding
 
+/// Wait until nobody listens on `path`. A listener this process just closed
+/// can live on for a moment in a child another test is forking (until it
+/// execs), so a socket isn't stale the instant its listener is dropped.
+fn wait_stale(path: &std::path::Path) {
+    wait_until("the socket to go stale", TIMEOUT, || {
+        UnixStream::connect(path).is_err_and(|e| e.kind() == io::ErrorKind::ConnectionRefused)
+    });
+}
+
 #[test]
 fn bind_replaces_a_stale_socket_and_refuses_a_live_one() {
     let dir = temp_dir("bind");
@@ -638,7 +647,7 @@ fn bind_replaces_a_stale_socket_and_refuses_a_live_one() {
     // A socket file nobody listens on (its daemon died).
     drop(UnixListener::bind(&path).unwrap());
     assert!(fs::symlink_metadata(&path).unwrap().file_type().is_socket());
-    assert_eq!(UnixStream::connect(&path).unwrap_err().kind(), io::ErrorKind::ConnectionRefused);
+    wait_stale(&path);
     let bound = bind(&path).unwrap();
     assert!(UnixStream::connect(&path).is_ok());
     // A second daemon on the same path: refused, the first keeps it.
@@ -693,6 +702,7 @@ fn a_client_finds_a_stale_socket_refused() {
     let path = dir.join("d.sock");
     assert_eq!(DaemonBackend::connect(&path, noop_waker()).err().unwrap().kind(), io::ErrorKind::NotFound);
     drop(UnixListener::bind(&path).unwrap());
+    wait_stale(&path);
     assert_eq!(DaemonBackend::connect(&path, noop_waker()).err().unwrap().kind(), io::ErrorKind::ConnectionRefused);
     // A daemon started there takes over, and clients reach it.
     let d = {

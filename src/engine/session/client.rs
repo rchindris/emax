@@ -89,7 +89,9 @@ impl DaemonBackend {
             Some(_) => return Err(io::Error::new(io::ErrorKind::InvalidData, "the session daemon did not greet")),
             None => return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "the session daemon hung up")),
         };
-        stream.set_read_timeout(None)?;
+        // macOS refuses socket options once the peer has hung up; the reader
+        // then finds the end of the stream, so that is not an error here.
+        let _ = stream.set_read_timeout(None);
         let notifier = Notifier::new(waker);
         let connected = Arc::new(AtomicBool::new(true));
         let (tx, incoming) = mpsc::sync_channel(CHANNEL_DEPTH);
@@ -126,21 +128,25 @@ impl DaemonBackend {
         idle_exit: Option<Duration>,
         waker: Waker,
     ) -> io::Result<Self> {
-        match Self::connect(socket, waker.clone()) {
-            Ok(b) => return Ok(b),
-            // Nothing there, or a socket file nobody listens on (the daemon
-            // replaces it): start one.
-            Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused) => {}
-            Err(e) => return Err(e),
-        }
-        start_daemon(program, socket, replay_bytes, idle_exit)?;
         let deadline = Instant::now() + START_TIMEOUT;
+        let mut last_start: Option<Instant> = None;
         loop {
-            match Self::connect(socket, waker.clone()) {
+            let e = match Self::connect(socket, waker.clone()) {
                 Ok(b) => return Ok(b),
-                Err(e) if Instant::now() >= deadline => return Err(e),
-                Err(_) => thread::sleep(Duration::from_millis(10)),
+                Err(e) if no_daemon(&e) => e,
+                Err(e) => return Err(e),
+            };
+            if Instant::now() >= deadline {
+                return Err(e);
             }
+            // Start one, again now and then: a daemon that said "in use" may
+            // have been looking at a socket that was just going away.
+            if last_start.is_none_or(|t| t.elapsed() >= RESTART_INTERVAL) {
+                start_daemon(program, socket, replay_bytes, idle_exit)?;
+                last_start = Some(Instant::now());
+                continue;
+            }
+            thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -213,6 +219,17 @@ impl DaemonBackend {
             }
         }
     }
+}
+
+/// How often `connect_or_start` tries starting a daemon while it can't connect.
+const RESTART_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Whether a failed connect means no daemon is serving the socket: nothing
+/// there, a socket file nobody listens on (a new daemon replaces it), or a
+/// daemon that hung up at once (it was exiting, e.g. idle).
+fn no_daemon(e: &io::Error) -> bool {
+    use io::ErrorKind::*;
+    matches!(e.kind(), NotFound | ConnectionRefused | ConnectionAborted | ConnectionReset | BrokenPipe | UnexpectedEof)
 }
 
 /// Start the daemon and wait for its starter process, which exits once the
@@ -329,5 +346,194 @@ impl PtyBackend for DaemonBackend {
 
     fn persistent(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::net::UnixListener;
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicUsize;
+    use std::thread::JoinHandle;
+
+    use super::*;
+    use crate::engine::pty::noop_waker;
+    use crate::engine::testutil::{TIMEOUT, temp_dir, wait_until};
+
+    /// A scripted daemon for one connection on a temporary socket.
+    fn fake(script: impl FnOnce(UnixStream) + Send + 'static) -> (PathBuf, PathBuf, JoinHandle<()>) {
+        let dir = temp_dir("fake");
+        let socket = dir.join("f.sock");
+        let l = UnixListener::bind(&socket).unwrap();
+        let t = thread::spawn(move || {
+            let (s, _) = l.accept().unwrap();
+            s.set_read_timeout(Some(TIMEOUT)).unwrap();
+            script(s)
+        });
+        (dir, socket, t)
+    }
+
+    /// Read the client's greeting and answer it.
+    fn greet(s: &mut UnixStream) {
+        assert!(matches!(read_frame::<ClientMsg>(s).unwrap(), Some(ClientMsg::Hello { version: PROTOCOL_VERSION, .. })));
+        write_frame(s, &DaemonMsg::Hello { version: PROTOCOL_VERSION, daemon_pid: 4242 }).unwrap();
+    }
+
+    fn next_req(s: &mut UnixStream) -> (u64, Op) {
+        match read_frame::<ClientMsg>(s).unwrap() {
+            Some(ClientMsg::Request { req, op }) => (req, op),
+            other => panic!("expected a request, got {other:?}"),
+        }
+    }
+
+    fn counting_waker() -> (Waker, Arc<AtomicUsize>) {
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let w = wakes.clone();
+        let waker: Waker = Arc::new(move || {
+            w.fetch_add(1, Ordering::SeqCst);
+        });
+        (waker, wakes)
+    }
+
+    #[test]
+    fn handshake_problems_are_errors() {
+        let (dir, socket, t) = fake(|mut s| {
+            let _ = read_frame::<ClientMsg>(&mut s);
+            write_frame(&mut s, &DaemonMsg::Hello { version: PROTOCOL_VERSION + 1, daemon_pid: 1 }).unwrap();
+        });
+        let e = DaemonBackend::connect(&socket, noop_waker()).err().unwrap();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+        assert!(e.to_string().contains("protocol"), "{e}");
+        t.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+
+        let (dir, socket, t) = fake(|mut s| {
+            let _ = read_frame::<ClientMsg>(&mut s);
+        });
+        assert_eq!(DaemonBackend::connect(&socket, noop_waker()).err().unwrap().kind(), io::ErrorKind::ConnectionAborted);
+        t.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+
+        let (dir, socket, t) = fake(|mut s| {
+            let _ = read_frame::<ClientMsg>(&mut s);
+            write_frame(&mut s, &DaemonMsg::Output { id: SessionId(1), data: vec![] }).unwrap();
+        });
+        assert_eq!(DaemonBackend::connect(&socket, noop_waker()).err().unwrap().kind(), io::ErrorKind::InvalidData);
+        t.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replies_time_out_and_late_replies_are_ignored() {
+        let (dir, socket, t) = fake(|mut s| {
+            greet(&mut s);
+            let (r1, _) = next_req(&mut s); // not answered in time
+            let (r2, op) = next_req(&mut s);
+            assert_eq!(op, Op::List);
+            write_frame(&mut s, &DaemonMsg::Reply { req: r1, result: Ok(Reply::Ok) }).unwrap();
+            write_frame(&mut s, &DaemonMsg::Output { id: SessionId(5), data: b"meanwhile".to_vec() }).unwrap();
+            write_frame(&mut s, &DaemonMsg::Reply { req: r2, result: Ok(Reply::Sessions(Vec::new())) }).unwrap();
+            let (r3, _) = next_req(&mut s);
+            write_frame(&mut s, &DaemonMsg::Reply { req: r3, result: Err("no session 9".into()) }).unwrap();
+            let (r4, _) = next_req(&mut s);
+            write_frame(&mut s, &DaemonMsg::Reply { req: r4, result: Err("disk on fire".into()) }).unwrap();
+            let (r5, _) = next_req(&mut s);
+            write_frame(&mut s, &DaemonMsg::Reply { req: r5, result: Ok(Reply::Ok) }).unwrap();
+            let _ = read_frame::<ClientMsg>(&mut s);
+        });
+        let mut c = DaemonBackend::connect(&socket, noop_waker()).unwrap();
+        assert_eq!(c.daemon_pid(), 4242);
+        c.set_reply_timeout(Duration::from_millis(50));
+        assert_eq!(c.list().unwrap_err().kind(), io::ErrorKind::TimedOut);
+        c.set_reply_timeout(TIMEOUT);
+        assert_eq!(c.list().unwrap(), []);
+        // The event that came with it is kept for try_recv.
+        assert_eq!(c.try_recv(), Some(PtyEvent::Output(SessionId(5), b"meanwhile".to_vec())));
+        assert_eq!(c.try_recv(), None);
+        assert_eq!(c.kill(SessionId(9)).unwrap_err().kind(), io::ErrorKind::NotFound);
+        let e = c.detach(SessionId(9)).unwrap_err();
+        assert_eq!((e.kind(), e.to_string()), (io::ErrorKind::Other, "disk on fire".to_string()));
+        // A reply of the wrong shape.
+        assert_eq!(c.spawn(SpawnSpec::default()).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        drop(c);
+        t.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_lost_connection_fails_later_calls_and_wakes_the_ui() {
+        let (dir, socket, t) = fake(|mut s| {
+            greet(&mut s);
+            write_frame(&mut s, &DaemonMsg::Output { id: SessionId(1), data: b"last".to_vec() }).unwrap();
+        });
+        let (waker, wakes) = counting_waker();
+        let mut c = DaemonBackend::connect(&socket, waker).unwrap();
+        t.join().unwrap();
+        wait_until("the disconnect to be noticed", TIMEOUT, || !c.is_connected());
+        assert!(wakes.load(Ordering::SeqCst) >= 1);
+        // What arrived before is still delivered; then nothing.
+        assert_eq!(c.try_recv(), Some(PtyEvent::Output(SessionId(1), b"last".to_vec())));
+        assert_eq!(c.try_recv(), None);
+        for e in [
+            c.spawn(SpawnSpec::default()).unwrap_err(),
+            c.write(SessionId(1), b"x").unwrap_err(),
+            c.resize(SessionId(1), PtySize::default()).unwrap_err(),
+            c.list().unwrap_err(),
+        ] {
+            assert_eq!(e.kind(), io::ErrorKind::NotConnected, "{e}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_waker_is_called_once_per_batch() {
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let (dir, socket, t) = fake(move |mut s| {
+            greet(&mut s);
+            for i in 0..5u8 {
+                write_frame(&mut s, &DaemonMsg::Output { id: SessionId(1), data: vec![i] }).unwrap();
+            }
+            go_rx.recv().unwrap();
+            write_frame(&mut s, &DaemonMsg::Exited { id: SessionId(1), status: Default::default() }).unwrap();
+            let _ = read_frame::<ClientMsg>(&mut s);
+        });
+        let (waker, wakes) = counting_waker();
+        let mut c = DaemonBackend::connect(&socket, waker).unwrap();
+        let mut got = Vec::new();
+        wait_until("five outputs", TIMEOUT, || {
+            while let Some(e) = c.try_recv() {
+                got.push(e);
+            }
+            got.len() == 5
+        });
+        assert!(wakes.load(Ordering::SeqCst) <= 5);
+        let before = wakes.load(Ordering::SeqCst);
+        go_tx.send(()).unwrap();
+        wait_until("a wake for the exit", TIMEOUT, || wakes.load(Ordering::SeqCst) == before + 1);
+        assert_eq!(c.try_recv(), Some(PtyEvent::Exited(SessionId(1), Default::default())));
+        drop(c);
+        t.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn connect_or_start_uses_a_running_daemon_and_reports_start_failures() {
+        // A daemon is listening: the program is not run.
+        let (dir, socket, t) = fake(|mut s| {
+            greet(&mut s);
+            let _ = read_frame::<ClientMsg>(&mut s);
+        });
+        let c = DaemonBackend::connect_or_start_with(Path::new("/nonexistent/emax"), &socket, 10, None, noop_waker()).unwrap();
+        drop(c);
+        t.join().unwrap();
+
+        // Nobody is listening and the program can't be run.
+        let missing = dir.join("none.sock");
+        let e = DaemonBackend::connect_or_start_with(Path::new("/nonexistent/emax"), &missing, 10, None, noop_waker()).err().unwrap();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound);
+        // It runs but fails.
+        let e = DaemonBackend::connect_or_start_with(Path::new("/usr/bin/false"), &missing, 10, None, noop_waker()).err().unwrap();
+        assert!(e.to_string().contains("could not start the session daemon"), "{e}");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

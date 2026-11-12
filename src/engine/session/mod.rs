@@ -467,4 +467,386 @@ mod tests {
         assert!(default_socket_path().ends_with("ptyd.sock"));
         assert_eq!(session_file_path(Path::new("/s")), PathBuf::from("/s/session.json"));
     }
+
+    // ------------------------------------------------- snapshot and restore
+
+    use std::cell::RefCell;
+
+    use crate::engine::cursor::Cursor;
+    use crate::engine::editor::Args;
+    use crate::engine::pty::local::LocalBackend;
+    use crate::engine::pty::mock::MockBackend;
+    use crate::engine::pty::noop_waker;
+    use crate::engine::term::Terminal;
+    use crate::engine::term::buffer::{InputMode, TermState};
+    use crate::engine::window::SplitDir;
+
+    /// The id of the buffer called `name`.
+    fn id_of(ed: &Editor, name: &str) -> BufferId {
+        ed.buffer_ids().into_iter().find(|&id| ed.find_buffer(id).unwrap().buf.name == name).unwrap_or_else(|| panic!("no buffer {name}"))
+    }
+
+    fn name_of(ed: &Editor, id: BufferId) -> String {
+        ed.find_buffer(id).map(|v| v.buf.name.clone()).unwrap_or_else(|| format!("#{id}"))
+    }
+
+    /// Show `buf` in a new window placed after the selected one (split `dir`),
+    /// with point at `point`; returns the window id.
+    fn split(ed: &mut Editor, dir: SplitDir, buf: BufferId, point: usize) -> WindowId {
+        let id = ed.layout.alloc_window_id();
+        let mut w = Window::new(id, buf);
+        w.cursors = vec![Cursor::new(1, point)];
+        ed.layout.windows.insert(id, w);
+        let sel = ed.layout.selected();
+        let tab = ed.layout.tab_mut();
+        let old = std::mem::replace(&mut tab.root, Node::Leaf(sel));
+        tab.root = Node::Split { dir, children: vec![old, Node::Leaf(id)], ratios: vec![0.6, 0.4] };
+        id
+    }
+
+    /// A session file with ids replaced by buffer names, for comparing
+    /// sessions across editors (ids are fresh after a restore).
+    fn by_name(s: &SessionFile) -> serde_json::Value {
+        let names: HashMap<BufferId, String> = s.buffers.iter().map(|b| (b.id, b.name.clone())).collect();
+        let mut buffers: Vec<serde_json::Value> = s
+            .buffers
+            .iter()
+            .map(|b| {
+                let mut v = serde_json::to_value(b).unwrap();
+                v.as_object_mut().unwrap().remove("id");
+                v
+            })
+            .collect();
+        buffers.sort_by_key(|v| v["name"].as_str().unwrap().to_string());
+        let tabs: Vec<serde_json::Value> = s
+            .tabs
+            .iter()
+            .map(|t| {
+                let mut v = serde_json::to_value(t).unwrap();
+                for (w, saved) in v["windows"].as_array_mut().unwrap().iter_mut().zip(&t.windows) {
+                    w["buffer"] = names[&saved.buffer].clone().into();
+                }
+                v
+            })
+            .collect();
+        serde_json::json!({ "buffers": buffers, "current": names[&s.current_buffer], "tabs": tabs, "current_tab": s.current_tab })
+    }
+
+    /// An editor with two files, a text buffer, a split and a second tab.
+    fn workspace(dir: &Path) -> Editor {
+        std::fs::write(dir.join("a.txt"), "alpha\nbeta\ngamma\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "0123456789").unwrap();
+        let mut ed = Editor::new(Buffer::from_str("*scratch*", "my notes"));
+        let notes = ed.add_buffer(Buffer::from_str("*notes*", "remember\n"));
+        let b = ed.add_buffer(Buffer::open(dir.join("b.txt")).unwrap());
+        let a = ed.add_buffer(Buffer::open(dir.join("a.txt")).unwrap());
+        ed.switch_to_buffer(a);
+        ed.cursors = vec![Cursor::new(1, 7)];
+        ed.primary = 1;
+        let w2 = split(&mut ed, SplitDir::Horizontal, b, 4);
+        ed.layout.windows.get_mut(&w2).unwrap().scroll_line = 2;
+        // A second tab, named, showing *notes*, then back to the first.
+        let w3 = ed.layout.alloc_window_id();
+        let mut w = Window::new(w3, notes);
+        w.cursors = vec![Cursor::new(1, 3)];
+        ed.layout.windows.insert(w3, w);
+        ed.layout.tabs.push(Tab { name: Some("notes".into()), root: Node::Leaf(w3), selected: w3 });
+        ed
+    }
+
+    #[test]
+    fn snapshot_lists_buffers_windows_and_points() {
+        let dir = temp_dir("snap");
+        let ed = workspace(&dir);
+        let s = ed.session_snapshot();
+        assert_eq!(s.version, SESSION_VERSION);
+        assert_eq!(s.buffers[0].name, "a.txt", "most recent first");
+        assert_eq!(s.buffers[0].point, 7);
+        assert_eq!(s.buffers[0].kind, SavedBufferKind::File { path: dir.join("a.txt") });
+        let notes = s.buffers.iter().find(|b| b.name == "*notes*").unwrap();
+        assert_eq!(notes.kind, SavedBufferKind::Text { text: "remember\n".into() });
+        assert_eq!(s.current_buffer, id_of(&ed, "a.txt"));
+        assert_eq!(s.tabs.len(), 2);
+        assert_eq!(s.current_tab, 0);
+        let t = &s.tabs[0];
+        assert_eq!(t.windows.len(), 2);
+        assert_eq!((t.windows[0].buffer, t.windows[0].point), (id_of(&ed, "a.txt"), 7), "selected: the editor's point");
+        assert_eq!((t.windows[1].buffer, t.windows[1].point, t.windows[1].scroll_line), (id_of(&ed, "b.txt"), 4, 2));
+        assert_eq!(s.tabs[1].name.as_deref(), Some("notes"));
+        assert!(validate(&s).is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn restore_round_trips_through_the_file() {
+        let dir = temp_dir("restore");
+        let ed = workspace(&dir);
+        let saved = ed.session_snapshot();
+        let path = session_file_path(&dir.join("state"));
+        save(&path, &saved).unwrap();
+
+        // A fresh editor, as at startup.
+        let mut fresh = Editor::new(Buffer::from_str("*scratch*", ";; welcome"));
+        let changes = Rc::new(RefCell::new(0));
+        let c = changes.clone();
+        fresh.hooks.add(EventKind::WindowConfigurationChanged, "count", Rc::new(move |_, _| {
+            *c.borrow_mut() += 1;
+            Ok(())
+        }));
+        assert!(fresh.restore_session_file(&path).unwrap());
+        fresh.run_hooks();
+        assert_eq!(*changes.borrow(), 1);
+        assert!(fresh.message.as_deref().unwrap().starts_with("Session restored"), "{:?}", fresh.message);
+
+        // Same buffers (the saved *scratch* replaced the new one), same layout.
+        assert_eq!(fresh.buffer_count(), 4);
+        assert_eq!(fresh.find_buffer(id_of(&fresh, "*scratch*")).unwrap().buf.rope.to_string(), "my notes");
+        assert_eq!(fresh.buf.name, "a.txt");
+        assert_eq!(fresh.cursors[0].point, 7);
+        assert_eq!(by_name(&fresh.session_snapshot()), by_name(&saved));
+
+        // The other window has its own point and scroll position.
+        let other = fresh.layout.tab().root.windows()[1];
+        let w = fresh.layout.window(other).unwrap();
+        assert_eq!((name_of(&fresh, w.buffer), w.cursors[0].point, w.scroll_line), ("b.txt".into(), 4, 2));
+        // Window ids keep counting from the restored ones.
+        let next = fresh.layout.alloc_window_id();
+        assert!(fresh.layout.windows.keys().all(|w| *w < next));
+        // Tabs: selecting the second shows *notes* at its point.
+        assert_eq!(fresh.layout.tabs[1].name.as_deref(), Some("notes"));
+        assert_eq!(fresh.layout.windows.len(), 3);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn restore_skips_files_that_are_gone() {
+        let dir = temp_dir("gone");
+        let ed = workspace(&dir);
+        let saved = ed.session_snapshot();
+        std::fs::remove_file(dir.join("b.txt")).unwrap();
+        let mut fresh = Editor::new(Buffer::from_str("*scratch*", ""));
+        fresh.restore_session(&saved).unwrap();
+        let msg = fresh.message.clone().unwrap();
+        assert!(msg.contains("skipped b.txt (file not found)"), "{msg}");
+        assert!(fresh.buffer_ids().iter().all(|&id| name_of(&fresh, id) != "b.txt"));
+        // Its window shows the restored current buffer instead.
+        let other = fresh.layout.tab().root.windows()[1];
+        assert_eq!(name_of(&fresh, fresh.layout.window(other).unwrap().buffer), "a.txt");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn restore_clamps_points_and_normalizes_ratios() {
+        let s = SessionFile {
+            version: SESSION_VERSION,
+            buffers: vec![SavedBuffer { id: 9, name: "t".into(), point: 1000, kind: SavedBufferKind::Text { text: "short".into() } }],
+            current_buffer: 9,
+            tabs: vec![SavedTab {
+                name: None,
+                root: Node::Split {
+                    dir: SplitDir::Vertical,
+                    children: vec![Node::Leaf(WindowId(4)), Node::Leaf(WindowId(7))],
+                    ratios: vec![1.0, 3.0],
+                },
+                selected: WindowId(7),
+                windows: vec![
+                    SavedWindow { id: WindowId(4), buffer: 9, point: 2, scroll_line: 0 },
+                    SavedWindow { id: WindowId(7), buffer: 9, point: 99, scroll_line: 0 },
+                ],
+            }],
+            current_tab: 5,
+        };
+        let mut ed = Editor::new(Buffer::from_str("*scratch*", ""));
+        ed.restore_session(&s).unwrap();
+        assert_eq!(ed.buf.name, "t");
+        assert_eq!(ed.cursors[0].point, 5, "clamped to the buffer");
+        assert_eq!(ed.layout.current_tab, 0);
+        assert_eq!(ed.layout.selected(), WindowId(7));
+        let Node::Split { ratios, .. } = &ed.layout.tab().root else { panic!() };
+        assert_eq!(ratios, &[0.25, 0.75]);
+        assert_eq!(ed.layout.window(WindowId(4)).unwrap().cursors[0].point, 2);
+        assert_eq!(ed.layout.alloc_window_id(), WindowId(8));
+    }
+
+    #[test]
+    fn malformed_layouts_are_refused_and_change_nothing() {
+        let base = SessionFile {
+            version: SESSION_VERSION,
+            buffers: vec![SavedBuffer { id: 1, name: "x".into(), point: 0, kind: SavedBufferKind::Text { text: "x".into() } }],
+            current_buffer: 1,
+            tabs: vec![SavedTab {
+                name: None,
+                root: Node::Leaf(WindowId(1)),
+                selected: WindowId(1),
+                windows: vec![SavedWindow { id: WindowId(1), buffer: 1, point: 0, scroll_line: 0 }],
+            }],
+            current_tab: 0,
+        };
+        assert!(validate(&base).is_ok());
+        let leaf = |n| Node::Leaf(WindowId(n));
+        let mut bad = Vec::new();
+        let mut s = base.clone();
+        s.tabs.clear();
+        bad.push((s, "no tabs"));
+        let mut s = base.clone();
+        s.tabs[0].selected = WindowId(2);
+        bad.push((s, "selected window"));
+        let mut s = base.clone();
+        s.tabs[0].windows.push(SavedWindow { id: WindowId(2), buffer: 1, point: 0, scroll_line: 0 });
+        bad.push((s, "does not match"));
+        let mut s = base.clone();
+        s.tabs[0].root = Node::Split { dir: SplitDir::Vertical, children: vec![leaf(1)], ratios: vec![1.0] };
+        bad.push((s, "two or more"));
+        let mut s = base.clone();
+        s.tabs[0].root = Node::Split { dir: SplitDir::Vertical, children: vec![leaf(1), leaf(2)], ratios: vec![1.0] };
+        s.tabs[0].windows.push(SavedWindow { id: WindowId(2), buffer: 1, point: 0, scroll_line: 0 });
+        bad.push((s, "one ratio per child"));
+        let mut s = base.clone();
+        s.tabs[0].root = Node::Split { dir: SplitDir::Vertical, children: vec![leaf(1), leaf(2)], ratios: vec![1.0, -1.0] };
+        s.tabs[0].windows.push(SavedWindow { id: WindowId(2), buffer: 1, point: 0, scroll_line: 0 });
+        bad.push((s, "positive"));
+        let mut s = base.clone();
+        s.tabs.push(s.tabs[0].clone());
+        bad.push((s, "twice"));
+        for (s, why) in bad {
+            let e = validate(&s).unwrap_err();
+            assert!(e.contains(why), "{e} (expected {why})");
+            let mut ed = Editor::new(Buffer::from_str("*scratch*", "untouched"));
+            assert_eq!(ed.restore_session(&s).unwrap_err().kind(), io::ErrorKind::InvalidData);
+            assert_eq!(ed.buffer_count(), 1);
+            assert_eq!(ed.rope().to_string(), "untouched");
+        }
+    }
+
+    #[test]
+    fn unusable_session_files_are_set_aside() {
+        let dir = temp_dir("corrupt");
+        let path = session_file_path(&dir);
+        let mut ed = Editor::new(Buffer::from_str("*scratch*", ""));
+        assert!(!ed.restore_session_file(&path).unwrap(), "no file: nothing to do");
+
+        for content in ["{ not json", "", "{\"version\": 1}", "[1, 2, 3]", "{\"version\": 99, \"buffers\": [], \"current_buffer\": 1, \"tabs\": [], \"current_tab\": 0}"] {
+            std::fs::write(&path, content).unwrap();
+            let e = ed.restore_session_file(&path).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{content}: {e}");
+            assert!(e.to_string().contains("corrupt"), "{e}");
+            assert!(!path.exists());
+            assert_eq!(std::fs::read_to_string(path.with_extension("json.corrupt")).unwrap(), content);
+        }
+        // A well-formed file with a broken layout too.
+        let mut s = sample();
+        s.tabs[0].selected = WindowId(42);
+        save(&path, &s).unwrap();
+        assert_eq!(ed.restore_session_file(&path).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(ed.buffer_count(), 1, "nothing restored");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Add a terminal buffer for `session` (as the term code does).
+    fn add_terminal(ed: &mut Editor, session: SessionId) -> BufferId {
+        let mut b = Buffer::from_str("*term*", "");
+        b.kind = BufferKind::Terminal;
+        let id = ed.add_buffer(b);
+        let spec = SpawnSpec { program: "/bin/zsh".into(), size: PtySize::new(100, 30), ..Default::default() };
+        ed.terminals.insert(id, TermState { term: Terminal::new(100, 30, 100), session, spec, mode: InputMode::Char, exited: None });
+        id
+    }
+
+    #[test]
+    fn terminal_buffers_are_saved_only_with_a_persistent_backend() {
+        let mut ed = Editor::new(Buffer::from_str("*scratch*", ""));
+        let (mock, _h) = MockBackend::new();
+        ed.set_pty_backend(Box::new(mock));
+        add_terminal(&mut ed, SessionId(12));
+        let s = ed.session_snapshot();
+        let t = s.buffers.iter().find(|b| b.name == "*term*").expect("saved");
+        let SavedBufferKind::Terminal { session, spec } = &t.kind else { panic!("{t:?}") };
+        assert_eq!((*session, spec.program.as_str(), spec.size), (SessionId(12), "/bin/zsh", PtySize::new(100, 30)));
+
+        // Processes that end with the editor are not saved.
+        let mut ed = Editor::new(Buffer::from_str("*scratch*", ""));
+        ed.set_pty_backend(Box::new(LocalBackend::new(noop_waker())));
+        let term = add_terminal(&mut ed, SessionId(3));
+        // Even a window showing it is kept (it will show another buffer).
+        split(&mut ed, SplitDir::Vertical, term, 0);
+        let s = ed.session_snapshot();
+        assert!(s.buffers.iter().all(|b| b.name != "*term*"));
+        assert!(validate(&s).is_ok());
+        let mut fresh = Editor::new(Buffer::from_str("*scratch*", ""));
+        fresh.restore_session(&s).unwrap();
+        assert_eq!(fresh.layout.windows.len(), 2);
+        assert!(fresh.layout.windows.values().all(|w| w.buffer == fresh.buf_id));
+    }
+
+    #[test]
+    fn terminal_buffers_reattach_or_are_reported() {
+        let (mock, h) = MockBackend::new();
+        let spec = SpawnSpec { program: "/bin/sh".into(), size: PtySize::new(80, 24), ..Default::default() };
+        let live = h.add_detached(spec.clone(), b"$ earlier output");
+        let saved = SessionFile {
+            version: SESSION_VERSION,
+            buffers: vec![
+                SavedBuffer { id: 1, name: "*scratch*".into(), point: 0, kind: SavedBufferKind::Text { text: String::new() } },
+                SavedBuffer { id: 2, name: "*term*".into(), point: 0, kind: SavedBufferKind::Terminal { session: live, spec: spec.clone() } },
+                SavedBuffer { id: 3, name: "*term*<2>".into(), point: 0, kind: SavedBufferKind::Terminal { session: SessionId(77), spec: spec.clone() } },
+            ],
+            current_buffer: 1,
+            tabs: vec![SavedTab {
+                name: None,
+                root: Node::Leaf(WindowId(1)),
+                selected: WindowId(1),
+                windows: vec![SavedWindow { id: WindowId(1), buffer: 1, point: 0, scroll_line: 0 }],
+            }],
+            current_tab: 0,
+        };
+        let mut ed = Editor::new(Buffer::from_str("*scratch*", ""));
+        ed.set_pty_backend(Box::new(mock));
+        ed.restore_session(&saved).unwrap();
+        let msg = ed.message.clone().unwrap();
+        // The ended session is always reported.
+        assert!(msg.contains("*term*<2> (session 77"), "{msg}");
+        // The live one is reattached (once terminal buffers can attach), or
+        // reported with the reason.
+        let attached = ed.buffer_ids().into_iter().find(|&id| ed.is_terminal(id));
+        match attached {
+            Some(id) => {
+                assert_eq!(ed.terminal(id).unwrap().session, live);
+                assert!(h.session(live).unwrap().attached);
+            }
+            None => assert!(msg.contains(&format!("*term* (session {}", live.0)), "{msg}"),
+        }
+
+        // Without a persistent backend, terminals are not reattached.
+        let mut ed = Editor::new(Buffer::from_str("*scratch*", ""));
+        ed.set_pty_backend(Box::new(LocalBackend::new(noop_waker())));
+        ed.restore_session(&saved).unwrap();
+        assert!(ed.message.clone().unwrap().contains("session daemon"));
+        assert_eq!(ed.buffer_count(), 1);
+    }
+
+    #[test]
+    fn the_session_is_saved_on_quit_by_a_named_hook() {
+        let dir = temp_dir("quit");
+        let path = session_file_path(&dir.join("state"));
+        let mut ed = workspace(&dir);
+        ed.save_session_on_quit(path.clone());
+        assert!(ed.hooks.handler_names(EventKind::KillEmacs).contains(&SAVE_HOOK));
+        ed.execute("save-buffers-kill-terminal", Args::default());
+        assert!(ed.quit_requested);
+        assert_eq!(load(&path).unwrap(), ed.session_snapshot());
+
+        // Removing the hook by name stops the saving.
+        std::fs::remove_file(&path).unwrap();
+        assert!(ed.hooks.remove(EventKind::KillEmacs, SAVE_HOOK));
+        ed.execute("save-buffers-kill-terminal", Args::default());
+        assert!(!path.exists());
+
+        // A failed save is reported in the echo area, not fatal.
+        let blocked = dir.join("blocked");
+        std::fs::write(&blocked, "a file, not a directory").unwrap();
+        ed.save_session_on_quit(blocked.join("session.json"));
+        ed.execute("save-buffers-kill-terminal", Args::default());
+        assert!(ed.message.clone().unwrap().contains("session-save"), "{:?}", ed.message);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
