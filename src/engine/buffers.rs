@@ -1,6 +1,7 @@
 //! Multiple buffers: the current one lives in `Editor.buf`/`cursors`; the
 //! others are parked in `Editor.others` in most-recently-used order, each with
-//! its own cursors. Also the picker's actions, for switch-to-buffer and M-x.
+//! its own cursors. Also the picker's actions, for switch-to-buffer and M-x (find-file's are in
+//! `files.rs`).
 
 use super::buffer::Buffer;
 use super::commands;
@@ -51,7 +52,7 @@ impl Editor {
         self.buf.name == name || self.others.iter().any(|s| s.buf.name == name)
     }
 
-    fn unique_name(&self, base: &str) -> String {
+    pub(crate) fn unique_name(&self, base: &str) -> String {
         if !self.name_taken(base) {
             return base.to_string();
         }
@@ -165,6 +166,7 @@ impl Editor {
             self.emit(Event::WindowConfigurationChanged);
         }
         self.terminal_buffer_killed(id);
+        self.direds.remove(&id);
         self.emit(Event::BufferKilled { buf: id, name });
     }
 
@@ -302,6 +304,7 @@ impl Editor {
                 let name = names[id as usize];
                 self.run_from_picker(name);
             }
+            PickerKind::Files { .. } => self.file_picker_accept(i),
         }
     }
 
@@ -324,10 +327,15 @@ impl Editor {
         p.confirm_kill = None;
         p.message = None;
         p.push_str(text);
+        self.sync_file_picker();
     }
 
     /// Run a picker action (one of `PICKER_ACTIONS`).
     pub fn picker_action(&mut self, action: &str) {
+        let files = self.picker.as_ref().is_some_and(|p| matches!(p.kind, PickerKind::Files { .. }));
+        if files && self.file_picker_action(action) {
+            return;
+        }
         let Some(p) = self.picker.as_mut() else { return };
         if action != "picker-kill-buffer" {
             p.confirm_kill = None;
@@ -405,7 +413,7 @@ fn group_digits(n: usize) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);

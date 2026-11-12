@@ -6,8 +6,8 @@ use std::rc::Rc;
 
 use super::tree::{Direction, ResizeError, fit, neighbour, resize_window};
 use super::*;
-use crate::engine::{Buffer, Dispatcher, Editor, EventKind, Key, Outcome};
 use crate::engine::editor::{Args, RawArg};
+use crate::engine::{Buffer, Dispatcher, Editor, EventKind, Key, Outcome};
 
 fn w(n: u64) -> WindowId {
     WindowId(n)
@@ -100,7 +100,10 @@ fn nested_splits_lay_out_in_tree_order() {
     // |   | 3 |
     let n = split(H, vec![leaf(1), split(V, vec![leaf(2), leaf(3)], &[0.5, 0.5])], &[0.5, 0.5]);
     let r = compute_rects(&n, rect(0.0, 0.0, 80.0, 24.0));
-    assert_eq!(r, [(w(1), rect(0.0, 0.0, 40.0, 24.0)), (w(2), rect(40.0, 0.0, 40.0, 12.0)), (w(3), rect(40.0, 12.0, 40.0, 12.0))]);
+    assert_eq!(
+        r,
+        [(w(1), rect(0.0, 0.0, 40.0, 24.0)), (w(2), rect(40.0, 0.0, 40.0, 12.0)), (w(3), rect(40.0, 12.0, 40.0, 12.0))]
+    );
     assert_eq!(window_rect(&n, rect(0.0, 0.0, 80.0, 24.0), w(3)), Some(rect(40.0, 12.0, 40.0, 12.0)));
     assert_eq!(window_rect(&n, rect(0.0, 0.0, 80.0, 24.0), w(9)), None);
 }
@@ -110,18 +113,17 @@ fn random_trees_always_tile_exactly() {
     let mut rng = Lcg(7);
     for round in 0..300 {
         let mut root = leaf(1);
-        let mut next = 2;
-        for _ in 0..rng.below(12) {
+        for next in (2..).take(rng.below(12) as usize) {
             let ws = root.windows();
             let target = ws[rng.below(ws.len() as u64) as usize];
             let dir = if rng.below(2) == 0 { H } else { V };
             assert!(root.split_window(target, w(next), dir));
-            next += 1;
         }
         // Random unequal ratios.
         perturb(&mut root, &mut rng);
         root.check().unwrap_or_else(|e| panic!("round {round}: {e}: {root:?}"));
-        let area = rect(rng.below(5) as f32, rng.below(5) as f32, 1.0 + rng.below(300) as f32, 1.0 + rng.below(100) as f32);
+        let area =
+            rect(rng.below(5) as f32, rng.below(5) as f32, 1.0 + rng.below(300) as f32, 1.0 + rng.below(100) as f32);
         let rects = compute_rects(&root, area);
         assert_eq!(rects.iter().map(|r| r.0).collect::<Vec<_>>(), root.windows());
         assert_tiles(&rects, area);
@@ -194,7 +196,11 @@ fn balance_shares_by_windows_across() {
     let mut n = split(V, vec![leaf(1), split(H, vec![leaf(2), leaf(3)], &[0.5, 0.5])], &[0.3, 0.7]);
     n.balance();
     assert!(approx(&ratios_of(&n), &[0.5, 0.5]));
-    let mut n = split(H, vec![leaf(1), split(V, vec![leaf(2), split(H, vec![leaf(3), leaf(4)], &[0.1, 0.9])], &[0.5, 0.5])], &[0.5, 0.5]);
+    let mut n = split(
+        H,
+        vec![leaf(1), split(V, vec![leaf(2), split(H, vec![leaf(3), leaf(4)], &[0.1, 0.9])], &[0.5, 0.5])],
+        &[0.5, 0.5],
+    );
     n.balance();
     assert!(approx(&ratios_of(&n), &[1.0 / 3.0, 2.0 / 3.0]));
     n.check().unwrap();
@@ -506,7 +512,11 @@ impl E {
     fn check(&self) {
         self.ed.layout.check().unwrap();
         let sel = self.ed.layout.selected();
-        assert_eq!(self.ed.layout.window(sel).unwrap().buffer, self.ed.buf_id, "selected window shows the current buffer");
+        assert_eq!(
+            self.ed.layout.window(sel).unwrap().buffer,
+            self.ed.buf_id,
+            "selected window shows the current buffer"
+        );
         for win in self.ed.layout.windows.values() {
             assert!(self.ed.find_buffer(win.buffer).is_some(), "{:?} shows a killed buffer", win.id);
         }
@@ -579,11 +589,10 @@ fn split_below_keeps_the_original_selected_with_a_copy_of_the_point() {
     assert_eq!(e.ed.layout.window(order[1]).unwrap().buffer, e.ed.buf_id);
     assert_eq!(e.heights(), [12.0, 12.0]);
     e.keys("C-x 3");
-    assert_eq!(e.ed.layout.window_rects().iter().map(|r| r.1).collect::<Vec<_>>(), [
-        rect(0.0, 0.0, 40.0, 12.0),
-        rect(40.0, 0.0, 40.0, 12.0),
-        rect(0.0, 12.0, 80.0, 12.0)
-    ]);
+    assert_eq!(
+        e.ed.layout.window_rects().iter().map(|r| r.1).collect::<Vec<_>>(),
+        [rect(0.0, 0.0, 40.0, 12.0), rect(40.0, 0.0, 40.0, 12.0), rect(0.0, 12.0, 80.0, 12.0)]
+    );
 }
 
 #[test]

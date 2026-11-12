@@ -54,16 +54,66 @@ pub struct TermState {
 /// Terminal buffer commands (looked up by `commands::lookup`).
 pub static COMMANDS: &[Command] = &[
     Command { name: "term", run: term, flags: flags::NO_UNDO, doc: "Start a shell in a new terminal buffer (*term*)." },
-    Command { name: "ansi-term", run: term, flags: flags::NO_UNDO, doc: "Start a shell in a new terminal buffer (same as term)." },
-    Command { name: "term-char-mode", run: term_char_mode, flags: flags::NO_UNDO, doc: "Send keys to the terminal's program (leave copy mode)." },
-    Command { name: "term-copy-mode", run: term_copy_mode, flags: flags::NO_UNDO, doc: "Copy mode: move, search and copy in the terminal's text." },
-    Command { name: "term-interrupt-subjob", run: term_interrupt_subjob, flags: flags::NO_UNDO, doc: "Send an interrupt (C-c) to the terminal's program." },
-    Command { name: "term-send-eof", run: term_send_eof, flags: flags::NO_UNDO, doc: "Send end-of-file (C-d) to the terminal's program." },
-    Command { name: "term-stop-subjob", run: term_stop_subjob, flags: flags::NO_UNDO, doc: "Send a stop (C-z) to the terminal's program." },
-    Command { name: "term-quit-subjob", run: term_quit_subjob, flags: flags::NO_UNDO, doc: "Send a quit (C-\\) to the terminal's program." },
-    Command { name: "term-paste", run: term_paste, flags: flags::NO_UNDO, doc: "Paste the last kill into the terminal (bracketed if the program asked)." },
-    Command { name: "term-scroll-up", run: term_scroll_up, flags: flags::NO_UNDO, doc: "Scroll the terminal view back into the history (a page, or N lines)." },
-    Command { name: "term-scroll-down", run: term_scroll_down, flags: flags::NO_UNDO, doc: "Scroll the terminal view toward the live screen (a page, or N lines)." },
+    Command {
+        name: "ansi-term",
+        run: term,
+        flags: flags::NO_UNDO,
+        doc: "Start a shell in a new terminal buffer (same as term).",
+    },
+    Command {
+        name: "term-char-mode",
+        run: term_char_mode,
+        flags: flags::NO_UNDO,
+        doc: "Send keys to the terminal's program (leave copy mode).",
+    },
+    Command {
+        name: "term-copy-mode",
+        run: term_copy_mode,
+        flags: flags::NO_UNDO,
+        doc: "Copy mode: move, search and copy in the terminal's text.",
+    },
+    Command {
+        name: "term-interrupt-subjob",
+        run: term_interrupt_subjob,
+        flags: flags::NO_UNDO,
+        doc: "Send an interrupt (C-c) to the terminal's program.",
+    },
+    Command {
+        name: "term-send-eof",
+        run: term_send_eof,
+        flags: flags::NO_UNDO,
+        doc: "Send end-of-file (C-d) to the terminal's program.",
+    },
+    Command {
+        name: "term-stop-subjob",
+        run: term_stop_subjob,
+        flags: flags::NO_UNDO,
+        doc: "Send a stop (C-z) to the terminal's program.",
+    },
+    Command {
+        name: "term-quit-subjob",
+        run: term_quit_subjob,
+        flags: flags::NO_UNDO,
+        doc: "Send a quit (C-\\) to the terminal's program.",
+    },
+    Command {
+        name: "term-paste",
+        run: term_paste,
+        flags: flags::NO_UNDO,
+        doc: "Paste the last kill into the terminal (bracketed if the program asked).",
+    },
+    Command {
+        name: "term-scroll-up",
+        run: term_scroll_up,
+        flags: flags::NO_UNDO,
+        doc: "Scroll the terminal view back into the history (a page, or N lines).",
+    },
+    Command {
+        name: "term-scroll-down",
+        run: term_scroll_down,
+        flags: flags::NO_UNDO,
+        doc: "Scroll the terminal view toward the live screen (a page, or N lines).",
+    },
 ];
 
 fn term(ed: &mut Editor, _: &Args) -> CmdResult {
@@ -229,7 +279,7 @@ impl Editor {
         let keymap = &self.terminal_config.keymap;
         let seq = std::slice::from_ref(&k);
         key.sup
-            || self.terminal_config.escape_keys.iter().any(|e| *e == k)
+            || self.terminal_config.escape_keys.contains(&k)
             || keymap.lookup(seq).is_some()
             || keymap.is_prefix(seq)
     }
@@ -341,10 +391,10 @@ impl Editor {
 
     /// Called by `kill_buffer`: forget the terminal state and kill the session.
     pub(crate) fn terminal_buffer_killed(&mut self, buf: BufferId) {
-        if let Some(t) = self.terminals.remove(&buf) {
-            if let Some(b) = self.pty.as_mut() {
-                let _ = b.kill(t.session);
-            }
+        if let Some(t) = self.terminals.remove(&buf)
+            && let Some(b) = self.pty.as_mut()
+        {
+            let _ = b.kill(t.session);
         }
     }
 

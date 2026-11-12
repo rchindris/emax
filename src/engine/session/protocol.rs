@@ -16,8 +16,8 @@
 
 use std::io::{self, Read, Write};
 
-use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use crate::engine::pty::{ExitStatus, PtySize, SessionId, SessionInfo, SpawnSpec};
 
@@ -34,11 +34,24 @@ pub const MAX_OUTPUT_CHUNK: usize = 64 << 10;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Op {
     Spawn(SpawnSpec),
-    Attach { id: SessionId, size: PtySize },
-    Detach { id: SessionId },
-    Write { id: SessionId, data: Vec<u8> },
-    Resize { id: SessionId, size: PtySize },
-    Kill { id: SessionId },
+    Attach {
+        id: SessionId,
+        size: PtySize,
+    },
+    Detach {
+        id: SessionId,
+    },
+    Write {
+        id: SessionId,
+        data: Vec<u8>,
+    },
+    Resize {
+        id: SessionId,
+        size: PtySize,
+    },
+    Kill {
+        id: SessionId,
+    },
     List,
     /// Kill every session and exit the daemon.
     Shutdown,
@@ -60,11 +73,23 @@ pub enum Reply {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DaemonMsg {
-    Hello { version: u32, daemon_pid: u32 },
+    Hello {
+        version: u32,
+        daemon_pid: u32,
+    },
     /// The answer to request `req`; `Err` carries a message.
-    Reply { req: u64, result: Result<Reply, String> },
-    Output { id: SessionId, data: Vec<u8> },
-    Exited { id: SessionId, status: ExitStatus },
+    Reply {
+        req: u64,
+        result: Result<Reply, String>,
+    },
+    Output {
+        id: SessionId,
+        data: Vec<u8>,
+    },
+    Exited {
+        id: SessionId,
+        status: ExitStatus,
+    },
 }
 
 /// One message as the bytes of a frame (length prefix included), for

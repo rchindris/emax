@@ -1,12 +1,13 @@
 //! GPUI view: renders the editor (the current tab's windows, each with
 //! virtualised lines, regions, multiple cursors and its own mode line and
 //! scroll position; the tab bar; the echo area; the buffer picker overlay; the
-//! swiper search panel) and translates platform key events into Emacs keys.
+//! swiper search panel; the settings editor) and translates platform key events into Emacs keys.
 //! The window layout itself (geometry, which window is selected) comes from
 //! the engine; the view only draws it. Also runs the editor's ticks: when a PTY
 //! backend has output (it calls the waker from its own thread) and when the
 //! next hook timer is due.
 
+mod settings_view;
 mod term_view;
 
 use std::cell::Cell;
@@ -20,15 +21,16 @@ use futures::StreamExt;
 
 use gpui::{
     AnyElement, App, ClipboardItem, Context, FocusHandle, Focusable, FontWeight, HighlightStyle, KeyDownEvent,
-    Keystroke, MouseButton, Pixels, Point, SharedString, StyledText, Task, UniformListScrollHandle, Window, div,
-    point, prelude::*, px, rgba, uniform_list,
+    Keystroke, MouseButton, Pixels, Point, ScrollHandle, SharedString, StyledText, Task, UniformListScrollHandle,
+    Window, div, point, prelude::*, px, rgba, uniform_list,
 };
 
+use emax::engine::dired::Face;
 use emax::engine::picker::{Picker, PickerKind};
-use emax::engine::{Swiper, SwiperExit};
 use emax::engine::term::Palette;
 use emax::engine::window::{Rect, WindowId, compute_rects};
 use emax::engine::{Appearance, Args, BufView, Dispatcher, Editor, Key, Keymap, Keymaps, Outcome, Scroll, Theme, text};
+use emax::engine::{Swiper, SwiperExit};
 
 // ------------------------------------------------------------------ layout
 
@@ -51,6 +53,9 @@ pub struct EmaxView {
     /// Keys while the buffer picker / the search panel is open.
     picker_keys: Keymap,
     search_keys: Keymap,
+    settings_keys: Keymap,
+    /// The settings editor's list.
+    settings_scroll: ScrollHandle,
     echo: Option<SharedString>,
     /// One scroll position per window and buffer it has shown, so switching
     /// a window back to a buffer restores its view there.
@@ -76,7 +81,13 @@ pub struct EmaxView {
 }
 
 impl EmaxView {
-    pub fn new(mut ed: Editor, keymaps: Keymaps, appearance: Appearance, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        mut ed: Editor,
+        keymaps: Keymaps,
+        appearance: Appearance,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let echo = ed.message.clone().map(SharedString::from);
         let cell_w = term_view::cell_width(appearance.fonts.size);
         // PTY backends call the waker from their threads; the view ticks the
@@ -120,6 +131,8 @@ impl EmaxView {
             keys: Dispatcher::new(),
             picker_keys: keymaps.picker,
             search_keys: keymaps.search,
+            settings_keys: keymaps.settings,
+            settings_scroll: ScrollHandle::new(),
             echo,
             scrolls: HashMap::new(),
             focus: cx.focus_handle(),
@@ -167,6 +180,11 @@ impl EmaxView {
                 });
             })
         });
+    }
+
+    /// Whether a panel that takes the keyboard (picker, search, settings) is open.
+    fn panel_open(&self) -> bool {
+        self.ed.picker.is_some() || self.ed.swiper.is_some() || self.ed.settings.is_some()
     }
 
     fn theme(&self) -> &Theme {
@@ -234,7 +252,7 @@ impl EmaxView {
 
     /// Select window `win` (a mouse click) and handle what that queued.
     fn click_window(&mut self, win: WindowId, cx: &mut Context<Self>) {
-        if self.ed.picker.is_some() || self.ed.swiper.is_some() || win == self.ed.layout.selected() {
+        if self.panel_open() || win == self.ed.layout.selected() {
             return;
         }
         self.ed.select_window(win);
@@ -246,7 +264,7 @@ impl EmaxView {
 
     /// Select tab `i` (a click in the tab bar).
     fn click_tab(&mut self, i: usize, cx: &mut Context<Self>) {
-        if self.ed.picker.is_some() || self.ed.swiper.is_some() {
+        if self.panel_open() {
             return;
         }
         self.ed.select_tab(i);
@@ -264,6 +282,12 @@ impl EmaxView {
     fn handle_key(&mut self, key: Key, cx: &mut Context<Self>) {
         self.key_started = Some(Instant::now());
 
+        if self.ed.settings.is_some() {
+            self.ed.settings_key(&self.settings_keys, &key);
+            self.after_settings(true, cx);
+            cx.stop_propagation();
+            return;
+        }
         if self.ed.picker.is_some() {
             self.ed.picker_key(&self.picker_keys, &key);
             self.after_picker(cx);
@@ -303,25 +327,31 @@ impl EmaxView {
     }
 
     fn run_command(&mut self, cmd: &'static str, args: Args, cx: &mut Context<Self>) {
-                if matches!(cmd, "yank" | "term-paste") {
-                    // interprogram-paste: pick up text copied in other apps.
-                    if let Some(t) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                        self.ed.clipboard_in(t);
-                    }
-                }
-                self.ed.page_lines = self.viewport().2;
-                self.ed.execute(cmd, args);
-                if let Some(s) = self.ed.clipboard_out.take() {
-                    cx.write_to_clipboard(ClipboardItem::new_string(s));
-                }
-                if self.ed.quit_requested {
-                    cx.quit();
-                }
-                self.echo = self.ed.message.clone().map(Into::into);
-                if self.ed.swiper.is_some() && self.swiper_scroll.is_none() {
-                    self.swiper_scroll = Some(self.selected_scroll().0.borrow().base_handle.offset());
-                }
-                self.apply_scroll();
+        if matches!(cmd, "yank" | "term-paste") {
+            // interprogram-paste: pick up text copied in other apps.
+            if let Some(t) = cx.read_from_clipboard().and_then(|c| c.text()) {
+                self.ed.clipboard_in(t);
+            }
+        }
+        self.ed.page_lines = self.viewport().2;
+        self.ed.execute(cmd, args);
+        if cmd == "save-buffer" {
+            self.after_save();
+        }
+        if let Some(s) = self.ed.clipboard_out.take() {
+            cx.write_to_clipboard(ClipboardItem::new_string(s));
+        }
+        if self.ed.quit_requested {
+            cx.quit();
+        }
+        self.echo = self.ed.message.clone().map(Into::into);
+        if self.ed.settings.is_some() {
+            self.after_settings(true, cx);
+        }
+        if self.ed.swiper.is_some() && self.swiper_scroll.is_none() {
+            self.swiper_scroll = Some(self.selected_scroll().0.borrow().base_handle.offset());
+        }
+        self.apply_scroll();
     }
 
     /// After the picker handled a key (or a click): update echo and scrolling,
@@ -433,6 +463,7 @@ impl EmaxView {
             .map(|(i, m)| {
                 let c = &p.candidates[m.index];
                 let selected = i == p.selected;
+                let is_dir = matches!(p.kind, PickerKind::Files { .. }) && c.label.ends_with('/');
                 div()
                     .id(("pick", i))
                     .flex()
@@ -449,18 +480,22 @@ impl EmaxView {
                         this.after_picker(cx);
                         cx.notify();
                     }))
-                    .child(
-                        div()
-                            .w(self.ui(3.0))
-                            .h(self.ui(16.0))
-                            .rounded_sm()
-                            .when(selected, |d| d.bg(rgba(t.cursor))),
-                    )
-                    .child(div().w(self.ui(10.0)).text_color(rgba(t.secondary_cursor)).child(if c.modified { "●" } else { "" }))
+                    .child(div().w(self.ui(3.0)).h(self.ui(16.0)).rounded_sm().when(selected, |d| d.bg(rgba(t.cursor))))
+                    .child(div().w(self.ui(10.0)).text_color(rgba(t.secondary_cursor)).child(if c.modified {
+                        "●"
+                    } else {
+                        ""
+                    }))
                     .child(
                         div()
                             .flex_none()
-                            .text_color(rgba(if selected { t.emphasis } else { t.foreground }))
+                            .text_color(rgba(if selected {
+                                t.emphasis
+                            } else if is_dir {
+                                t.accent
+                            } else {
+                                t.foreground
+                            }))
                             .when(selected, |d| d.font_weight(FontWeight::SEMIBOLD))
                             .child(highlighted(&c.label, &m.positions, t)),
                     )
@@ -486,17 +521,46 @@ impl EmaxView {
                             .text_color(rgba(t.dim))
                             .child(c.detail.clone()),
                     )
-                    .child(div().flex_none().text_size(self.ui(12.0)).text_color(rgba(t.dim)).child(c.annotation.clone()))
+                    .child(
+                        div().flex_none().text_size(self.ui(12.0)).text_color(rgba(t.dim)).child(c.annotation.clone()),
+                    )
             })
             .collect();
 
         let query: SharedString = p.query.clone().into();
         let empty = n == 0;
         let commands = matches!(p.kind, PickerKind::Commands { .. });
-        let footer_hint = if commands {
-            hints(&self.picker_keys, &[("picker-accept", "run"), ("picker-next", "next"), ("picker-previous", "prev"), ("picker-quit", "cancel")])
+        let files = matches!(p.kind, PickerKind::Files { .. });
+        let footer_hint = if files {
+            let typed = !p.filter().is_empty();
+            let saving = p.saving();
+            let literal = p.purpose().is_some_and(|f| f.literal());
+            let accept = p.file_accept_hint();
+            let mut items = vec![("picker-accept", accept), ("picker-next", "next"), ("picker-previous", "prev")];
+            if typed && p.selected_candidate().is_some() && !literal {
+                items.push(("picker-accept-input", if saving { "save as typed" } else { "open as typed" }));
+            }
+            if !typed {
+                items.push(("picker-delete-char", "up"));
+            }
+            items.push(("picker-quit", "cancel"));
+            items.retain(|(_, l)| !l.is_empty());
+            hints(&self.picker_keys, &items)
+        } else if commands {
+            hints(
+                &self.picker_keys,
+                &[
+                    ("picker-accept", "run"),
+                    ("picker-next", "next"),
+                    ("picker-previous", "prev"),
+                    ("picker-quit", "cancel"),
+                ],
+            )
         } else if empty && !p.query.trim().is_empty() {
-            hints(&self.picker_keys, &[("picker-accept", &format!("create buffer “{}”", p.query.trim())), ("picker-quit", "cancel")])
+            hints(
+                &self.picker_keys,
+                &[("picker-accept", &format!("create buffer “{}”", p.query.trim())), ("picker-quit", "cancel")],
+            )
         } else {
             hints(
                 &self.picker_keys,
@@ -535,7 +599,11 @@ impl EmaxView {
                     .pt_3()
                     .text_size(self.ui(11.5))
                     .text_color(rgba(t.dim))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(if commands { p.prompt.clone() } else { p.prompt.to_uppercase() }))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(if commands {
+                        p.prompt.clone()
+                    } else {
+                        p.prompt.to_uppercase()
+                    }))
                     .child(div().flex_1())
                     .child(format!("{n} / {}", p.candidates.len())),
             )
@@ -552,30 +620,26 @@ impl EmaxView {
                     .child(div().text_color(rgba(t.accent)).child("❯"))
                     .child(query_with_caret(&query, self.ui(18.0), t))
                     .when(query.is_empty(), |d| {
-                        d.child(div().text_color(rgba(t.dim)).child(if commands { "Type to filter commands…" } else { "Type to filter buffers…" }))
+                        d.child(div().text_color(rgba(t.dim)).child(if commands {
+                            "Type to filter commands…"
+                        } else if files {
+                            "Type a path…"
+                        } else {
+                            "Type to filter buffers…"
+                        }))
                     }),
             )
-            .child(
-                div()
-                    .p_1p5()
-                    .flex()
-                    .flex_col()
-                    .gap_0p5()
-                    .children(rows)
-                    .when(empty, |d| {
-                        d.child(
-                            div()
-                                .px_3()
-                                .py_4()
-                                .text_color(rgba(t.dim))
-                                .child(match (commands, p.query.trim().is_empty()) {
-                                    (true, _) => "No matching command",
-                                    (false, true) => "No buffers",
-                                    (false, false) => "No matching buffer",
-                                }),
-                        )
-                    }),
-            )
+            .child(div().p_1p5().flex().flex_col().gap_0p5().children(rows).when(empty, |d| {
+                d.child(div().px_3().py_4().text_color(rgba(t.dim)).child(
+                    match (commands, p.query.trim().is_empty()) {
+                        _ if files && p.filter().is_empty() => "Empty or unreadable directory",
+                        _ if files => "No matching file",
+                        (true, _) => "No matching command",
+                        (false, true) => "No buffers",
+                        (false, false) => "No matching buffer",
+                    },
+                ))
+            }))
             .child(
                 div()
                     .flex()
@@ -619,7 +683,8 @@ impl EmaxView {
             .map(|(i, &line)| {
                 let selected = i == s.selected;
                 // Tabs become one space so match columns still line up.
-                let text: String = s.line_text(line).chars().take(SWIPER_COLS).map(|c| if c == '\t' { ' ' } else { c }).collect();
+                let text: String =
+                    s.line_text(line).chars().take(SWIPER_COLS).map(|c| if c == '\t' { ' ' } else { c }).collect();
                 let positions: Vec<usize> =
                     s.highlights(line).into_iter().flatten().filter(|&p| p < SWIPER_COLS).collect();
                 div()
@@ -680,11 +745,17 @@ impl EmaxView {
             .px_3()
             .border_b_1()
             .border_color(rgba(t.panel_border))
-            .child(div().text_color(rgba(t.accent)).font_weight(FontWeight::SEMIBOLD).child(if s.backward { "Swiper ↑" } else { "Swiper" }))
+            .child(div().text_color(rgba(t.accent)).font_weight(FontWeight::SEMIBOLD).child(if s.backward {
+                "Swiper ↑"
+            } else {
+                "Swiper"
+            }))
             .child(div().text_color(rgba(t.dim)).child(count))
             .child(div().text_color(rgba(t.accent)).child("❯"))
             .child(query_with_caret(&query, self.ui(16.0).min(px(lh)), t))
-            .when(query.is_empty(), |d| d.child(div().text_color(rgba(t.dim)).child("Search…  (space separates terms)")))
+            .when(query.is_empty(), |d| {
+                d.child(div().text_color(rgba(t.dim)).child("Search…  (space separates terms)"))
+            })
             .child(div().flex_1())
             .child(
                 div()
@@ -743,7 +814,11 @@ fn hints(keymap: &Keymap, items: &[(&str, &str)]) -> String {
 
 /// A label with the fuzzy-matched characters highlighted.
 fn highlighted(label: &str, positions: &[usize], t: &Theme) -> StyledText {
-    let style = HighlightStyle { color: Some(rgba(t.match_text).into()), font_weight: Some(FontWeight::BOLD), ..Default::default() };
+    let style = HighlightStyle {
+        color: Some(rgba(t.match_text).into()),
+        font_weight: Some(FontWeight::BOLD),
+        ..Default::default()
+    };
     let mut ranges: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
     let offsets: Vec<(usize, char)> = label.char_indices().collect();
     for &p in positions {
@@ -794,9 +869,27 @@ fn is_dark(a: gpui::WindowAppearance) -> bool {
 
 fn shifted(c: char) -> char {
     const PAIRS: &[(char, char)] = &[
-        ('1', '!'), ('2', '@'), ('3', '#'), ('4', '$'), ('5', '%'), ('6', '^'), ('7', '&'),
-        ('8', '*'), ('9', '('), ('0', ')'), ('-', '_'), ('=', '+'), ('[', '{'), (']', '}'),
-        ('\\', '|'), (';', ':'), ('\'', '"'), (',', '<'), ('.', '>'), ('/', '?'), ('`', '~'),
+        ('1', '!'),
+        ('2', '@'),
+        ('3', '#'),
+        ('4', '$'),
+        ('5', '%'),
+        ('6', '^'),
+        ('7', '&'),
+        ('8', '*'),
+        ('9', '('),
+        ('0', ')'),
+        ('-', '_'),
+        ('=', '+'),
+        ('[', '{'),
+        (']', '}'),
+        ('\\', '|'),
+        (';', ':'),
+        ('\'', '"'),
+        (',', '<'),
+        ('.', '>'),
+        ('/', '?'),
+        ('`', '~'),
     ];
     PAIRS.iter().find(|(a, _)| *a == c).map(|(_, b)| *b).unwrap_or(c)
 }
@@ -817,6 +910,7 @@ enum CellKind {
 /// columns, `current` for the selected one), region and cursor cells
 /// highlighted. In an unselected window (`active` false) the region is not
 /// shown and every cursor is drawn as a secondary one.
+#[allow(clippy::too_many_arguments)]
 fn render_line(
     v: &BufView,
     line: usize,
@@ -824,6 +918,8 @@ fn render_line(
     active: bool,
     matches: &[Range<usize>],
     current: bool,
+    faces: &[(Range<usize>, Face)],
+    syntax: &[(Range<usize>, u32)],
     t: &Theme,
 ) -> StyledText {
     let r = &v.buf.rope;
@@ -849,11 +945,18 @@ fn render_line(
 
     let cells = shown + 1;
     let mut class = vec![CellKind::Plain; cells];
+    let mut face: Vec<Option<Face>> = vec![None; cells];
+    for (r, f) in faces {
+        face[r.start.min(shown)..r.end.min(shown)].fill(Some(*f));
+    }
+    // Syntax colors are the text color under everything else.
+    let mut fg: Vec<Option<u32>> = vec![None; cells];
+    for (r, c) in syntax {
+        fg[r.start.min(shown)..r.end.min(shown)].fill(Some(*c));
+    }
     let hl = if current { CellKind::CurrentMatch } else { CellKind::Match };
     for m in matches {
-        for col in m.start.min(shown)..m.end.min(shown) {
-            class[col] = hl;
-        }
+        class[m.start.min(shown)..m.end.min(shown)].fill(hl);
     }
     if active {
         let line_end_incl = start + len + 1; // includes the newline position
@@ -871,15 +974,37 @@ fn render_line(
         }
     }
 
-    let style = |k: CellKind| match k {
-        CellKind::Plain => None,
-        CellKind::Match => Some(HighlightStyle { background_color: Some(rgba(t.search_match).into()), ..Default::default() }),
+    let face_style = |f: Option<Face>, fg: Option<u32>| {
+        let Some(f) = f else {
+            return fg.map(|c| HighlightStyle { color: Some(rgba(c).into()), ..Default::default() });
+        };
+        let color = match f {
+            Face::Header => t.emphasis,
+            Face::Directory => t.term_blue,
+            Face::Symlink => t.term_cyan,
+            Face::Executable => t.term_green,
+            Face::Details => t.dim,
+            Face::Marked => t.term_yellow,
+            Face::Flagged => t.term_red,
+        };
+        let weight = matches!(f, Face::Header | Face::Marked | Face::Flagged).then_some(FontWeight::BOLD);
+        Some(HighlightStyle { color: Some(rgba(color).into()), font_weight: weight, ..Default::default() })
+    };
+    let style = |k: CellKind, f: Option<Face>, fg: Option<u32>| match k {
+        CellKind::Plain => face_style(f, fg),
+        CellKind::Match => Some(HighlightStyle {
+            background_color: Some(rgba(t.search_match).into()),
+            ..face_style(f, fg).unwrap_or_default()
+        }),
         CellKind::CurrentMatch => Some(HighlightStyle {
             background_color: Some(rgba(t.search_current).into()),
             color: Some(rgba(t.background).into()),
             ..Default::default()
         }),
-        CellKind::Region => Some(HighlightStyle { background_color: Some(rgba(t.region).into()), ..Default::default() }),
+        CellKind::Region => Some(HighlightStyle {
+            background_color: Some(rgba(t.region).into()),
+            ..face_style(f, fg).unwrap_or_default()
+        }),
         CellKind::Cursor => Some(HighlightStyle {
             background_color: Some(rgba(t.cursor).into()),
             color: Some(rgba(t.background).into()),
@@ -894,12 +1019,12 @@ fn render_line(
     let mut highlights: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
     let mut i = 0;
     while i < cells {
-        let k = class[i];
+        let (k, f, c) = (class[i], face[i], fg[i]);
         let mut j = i + 1;
-        while j < cells && class[j] == k {
+        while j < cells && class[j] == k && face[j] == f && fg[j] == c {
             j += 1;
         }
-        if let Some(s) = style(k) {
+        if let Some(s) = style(k, f, c) {
             highlights.push((offs[i]..offs[j], s));
         }
         i = j;
@@ -927,7 +1052,13 @@ impl EmaxView {
     fn mode_line_info(&self, win: WindowId) -> Option<ModeLine> {
         let v = self.ed.window_view(win)?;
         let r = &v.buf.rope;
-        let p = v.cursors.iter().find(|c| c.id == v.primary).or(v.cursors.first()).map_or(0, |c| c.point).min(r.len_chars());
+        let p = v
+            .cursors
+            .iter()
+            .find(|c| c.id == v.primary)
+            .or(v.cursors.first())
+            .map_or(0, |c| c.point)
+            .min(r.len_chars());
         let line = r.char_to_line(p);
         Some(ModeLine {
             buf: v.id,
@@ -960,6 +1091,9 @@ impl EmaxView {
                 let search = this.ed.swiper.as_ref().filter(|_| selected);
                 let selected_match = search.and_then(|s| s.selected_line());
                 let tab_width = this.ed.tab_width_of(v.buf);
+                // One highlights query for all the rows being laid out.
+                let first = range.start;
+                let colors = v.buf.syntax.as_ref().map(|s| s.highlight(&v.buf.rope, range.clone(), t));
                 let rows: Vec<_> = range
                     .map(|ix| {
                         let is_cur = selected && ix == cur_line;
@@ -983,7 +1117,19 @@ impl EmaxView {
                             )
                             .child({
                                 let hl = search.map(|s| s.highlights(ix)).unwrap_or_default();
-                                render_line(&v, ix, tab_width, selected, &hl, selected_match == Some(ix), t)
+                                let faces = this.ed.line_faces(v.id, ix);
+                                let syntax = colors.as_ref().and_then(|c| c.get(ix - first)).map_or(&[][..], |c| c);
+                                render_line(
+                                    &v,
+                                    ix,
+                                    tab_width,
+                                    selected,
+                                    &hl,
+                                    selected_match == Some(ix),
+                                    &faces,
+                                    syntax,
+                                    t,
+                                )
                             })
                     })
                     .collect();
@@ -1019,12 +1165,20 @@ impl EmaxView {
             .bg(rgba(bg))
             .when(!selected, |d| d.border_t_1().border_color(rgba(t.panel_border)))
             .text_color(rgba(if selected { t.foreground } else { t.dim }))
-            .child(div().text_color(rgba(if selected { t.accent } else { t.dim })).child(if m.modified { "●" } else { "○" }))
-            .child(div().font_weight(if selected { FontWeight::BOLD } else { FontWeight::NORMAL }).child(m.name.clone()))
+            .child(div().text_color(rgba(if selected { t.accent } else { t.dim })).child(if m.modified {
+                "●"
+            } else {
+                "○"
+            }))
+            .child(
+                div().font_weight(if selected { FontWeight::BOLD } else { FontWeight::NORMAL }).child(m.name.clone()),
+            )
             .child(div().text_color(rgba(t.dim)).child(format!("({})", m.lighters)))
             .when(m.previewing, |d| d.child(div().text_color(rgba(t.accent)).child("preview")))
             .child(format!("L{} C{}", m.line + 1, m.col))
-            .when(m.cursors > 1, |d| d.child(div().text_color(rgba(t.secondary_cursor)).child(format!("{} cursors", m.cursors))))
+            .when(m.cursors > 1, |d| {
+                d.child(div().text_color(rgba(t.secondary_cursor)).child(format!("{} cursors", m.cursors)))
+            })
             .when(selected && m.region_len > 0, |d| {
                 d.child(div().text_color(rgba(t.cursor)).child(format!("{} selected", m.region_len)))
             })
@@ -1047,7 +1201,15 @@ impl EmaxView {
     /// Window `win` at `r` (pixels, within the windows' area of width
     /// `area_w`): its text or terminal, the search panel if it is selected
     /// and searching, and its mode line.
-    fn render_window(&mut self, win: WindowId, r: Rect, area_w: f32, owns_terminal: bool, t0: Instant, cx: &mut Context<Self>) -> AnyElement {
+    fn render_window(
+        &mut self,
+        win: WindowId,
+        r: Rect,
+        area_w: f32,
+        owns_terminal: bool,
+        t0: Instant,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(m) = self.mode_line_info(win) else { return div().into_any_element() };
         let selected = win == self.ed.layout.selected();
         let t = self.theme().clone();
@@ -1078,7 +1240,12 @@ impl EmaxView {
                 } else {
                     Some(snap)
                 };
-                div().flex_1().min_h_0().overflow_hidden().children(snap.map(|s| term_view::render_terminal(&s, self.cell_w, lh))).into_any_element()
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .children(snap.map(|s| term_view::render_terminal(&s, self.cell_w, lh)))
+                    .into_any_element()
             }
             None => self.render_text(win, &m, gutter_w, cx),
         };
@@ -1180,6 +1347,10 @@ impl Render for EmaxView {
 
         self.prune_scrolls();
         let order: Vec<WindowId> = rects.iter().map(|r| r.0).collect();
+        // Parse what changed in the buffers on screen before their rows are laid out.
+        let mut shown: Vec<u64> = order.iter().filter_map(|w| self.ed.layout.window(*w).map(|w| w.buffer)).collect();
+        shown.push(self.ed.buf_id);
+        self.ed.update_syntax(&shown);
         let owners = self.ed.terminal_owners(&order);
         let windows: Vec<AnyElement> = rects
             .iter()
@@ -1202,6 +1373,7 @@ impl Render for EmaxView {
             .child(self.echo.clone().unwrap_or_default());
         let tab_bar = self.render_tab_bar(cx);
         let picker = self.ed.picker.as_ref().map(|p| self.render_picker(p, cx));
+        let settings = self.ed.settings.as_ref().map(|s| self.render_settings(s, cx));
 
         div()
             .track_focus(&self.focus)
@@ -1219,5 +1391,6 @@ impl Render for EmaxView {
             .child(div().relative().flex_none().w_full().h(px(area_h)).children(windows))
             .child(echo)
             .children(picker)
+            .children(settings)
     }
 }

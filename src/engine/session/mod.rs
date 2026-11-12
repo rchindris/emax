@@ -13,9 +13,9 @@
 
 pub mod client;
 pub mod daemon;
-pub mod protocol;
 #[cfg(test)]
 mod daemon_tests;
+pub mod protocol;
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -61,6 +61,8 @@ pub enum SavedBufferKind {
     File { path: PathBuf },
     /// A buffer with no file (e.g. *scratch*): its text is saved.
     Text { text: String },
+    /// A directory listing (dired): read again.
+    Directory { path: PathBuf },
     /// A terminal buffer: reattached to the daemon session (or, if that is
     /// gone, kept as a dead terminal buffer).
     Terminal { session: SessionId, spec: SpawnSpec },
@@ -245,8 +247,18 @@ impl Editor {
         let buffers = current
             .chain(others)
             .filter_map(|(id, buf, point)| {
+                if let Some(d) = self.direds.get(&id) {
+                    return Some(SavedBuffer {
+                        id,
+                        name: buf.name.clone(),
+                        point,
+                        kind: SavedBufferKind::Directory { path: d.dir.clone() },
+                    });
+                }
                 let kind = match (self.terminals.get(&id), &buf.path) {
-                    (Some(t), _) if persistent => SavedBufferKind::Terminal { session: t.session, spec: t.spec.clone() },
+                    (Some(t), _) if persistent => {
+                        SavedBufferKind::Terminal { session: t.session, spec: t.spec.clone() }
+                    }
                     (Some(_), _) => return None,
                     (None, Some(path)) => SavedBufferKind::File { path: path.clone() },
                     (None, None) => SavedBufferKind::Text { text: buf.rope.to_string() },
@@ -259,7 +271,11 @@ impl Editor {
             id: w.id,
             buffer: w.buffer,
             // The selected window's live cursors are the editor's.
-            point: if w.id == selected { primary_point(&self.cursors, self.primary) } else { primary_point(&w.cursors, w.primary) },
+            point: if w.id == selected {
+                primary_point(&self.cursors, self.primary)
+            } else {
+                primary_point(&w.cursors, w.primary)
+            },
             scroll_line: w.scroll_line,
         };
         let tabs = self
@@ -273,7 +289,13 @@ impl Editor {
                 windows: t.root.windows().into_iter().filter_map(|id| self.layout.window(id)).map(window).collect(),
             })
             .collect();
-        SessionFile { version: SESSION_VERSION, buffers, current_buffer: self.buf_id, tabs, current_tab: self.layout.current_tab }
+        SessionFile {
+            version: SESSION_VERSION,
+            buffers,
+            current_buffer: self.buf_id,
+            tabs,
+            current_tab: self.layout.current_tab,
+        }
     }
 
     /// Recreate the buffers, tabs and windows of `s`, reattaching terminal
@@ -314,7 +336,10 @@ impl Editor {
     fn restore_buffer(&mut self, b: &SavedBuffer, persistent: bool) -> Result<BufferId, String> {
         match &b.kind {
             SavedBufferKind::File { path } => {
-                let open = self.buffer_ids().into_iter().find(|&id| self.find_buffer(id).is_some_and(|v| v.buf.path.as_deref() == Some(path)));
+                let open = self
+                    .buffer_ids()
+                    .into_iter()
+                    .find(|&id| self.find_buffer(id).is_some_and(|v| v.buf.path.as_deref() == Some(path)));
                 if let Some(id) = open {
                     return Ok(id);
                 }
@@ -322,6 +347,13 @@ impl Editor {
                     return Err("file not found".into());
                 }
                 Buffer::open(path.clone()).map(|buf| self.add_buffer(buf)).map_err(|e| e.to_string())
+            }
+            SavedBufferKind::Directory { path } => {
+                let open = self.direds.iter().find(|(_, d)| d.dir == *path).map(|(id, _)| *id);
+                match open {
+                    Some(id) => Ok(id),
+                    None => self.make_dired_buffer(path),
+                }
             }
             SavedBufferKind::Text { text } => {
                 let mut buf = Buffer::from_str(&b.name, text);
@@ -382,7 +414,9 @@ impl Editor {
     fn scratch_named(&self, name: &str) -> Option<BufferId> {
         self.buffer_ids().into_iter().find(|&id| {
             !self.terminals.contains_key(&id)
-                && self.find_buffer(id).is_some_and(|v| v.buf.name == name && v.buf.path.is_none() && v.buf.kind == BufferKind::Text)
+                && self
+                    .find_buffer(id)
+                    .is_some_and(|v| v.buf.name == name && v.buf.path.is_none() && v.buf.kind == BufferKind::Text)
         })
     }
 
@@ -433,7 +467,12 @@ impl Editor {
     /// startup message when there is nothing to restore, and always when
     /// the configuration had problems (they matter more than the restore
     /// summary). Returns the restore error, if any, for the caller to log.
-    pub fn startup_session(&mut self, file: Option<PathBuf>, files_named: bool, config_warnings: bool) -> Option<io::Error> {
+    pub fn startup_session(
+        &mut self,
+        file: Option<PathBuf>,
+        files_named: bool,
+        config_warnings: bool,
+    ) -> Option<io::Error> {
         let file = file.filter(|_| self.session_config.restore_session && !files_named)?;
         let startup = self.message.take();
         let mut error = None;
@@ -472,15 +511,29 @@ mod tests {
         SessionFile {
             version: SESSION_VERSION,
             buffers: vec![
-                SavedBuffer { id: 1, name: "main.rs".into(), point: 5, kind: SavedBufferKind::File { path: "/x/main.rs".into() } },
-                SavedBuffer { id: 2, name: "*scratch*".into(), point: 0, kind: SavedBufferKind::Text { text: "hi".into() } },
+                SavedBuffer {
+                    id: 1,
+                    name: "main.rs".into(),
+                    point: 5,
+                    kind: SavedBufferKind::File { path: "/x/main.rs".into() },
+                },
+                SavedBuffer {
+                    id: 2,
+                    name: "*scratch*".into(),
+                    point: 0,
+                    kind: SavedBufferKind::Text { text: "hi".into() },
+                },
                 SavedBuffer {
                     id: 3,
                     name: "*term*".into(),
                     point: 0,
                     kind: SavedBufferKind::Terminal {
                         session: SessionId(12),
-                        spec: SpawnSpec { program: "/bin/zsh".into(), size: PtySize::new(80, 24), ..Default::default() },
+                        spec: SpawnSpec {
+                            program: "/bin/zsh".into(),
+                            size: PtySize::new(80, 24),
+                            ..Default::default()
+                        },
                     },
                 },
             ],
@@ -542,12 +595,20 @@ mod tests {
         let cfg = Some(Path::new("/cfg/d.sock"));
         let tmp = Path::new("/tmpdir");
         let env = env_of(&[("EMAX_PTYD_SOCKET", "/env/d.sock")]);
-        assert_eq!(socket_path_in(&env, cfg, tmp), PathBuf::from("/env/d.sock"), "the environment wins, as for state_dir");
+        assert_eq!(
+            socket_path_in(&env, cfg, tmp),
+            PathBuf::from("/env/d.sock"),
+            "the environment wins, as for state_dir"
+        );
         let none = env_of(&[("EMAX_PTYD_SOCKET", "")]);
         assert_eq!(socket_path_in(&none, cfg, tmp), PathBuf::from("/cfg/d.sock"));
         // SAFETY: getuid has no preconditions.
         let uid = unsafe { libc::getuid() };
-        assert_eq!(socket_path_in(&none, None, tmp), PathBuf::from(format!("/tmpdir/emax-{uid}/ptyd.sock")), "a per-user directory");
+        assert_eq!(
+            socket_path_in(&none, None, tmp),
+            PathBuf::from(format!("/tmpdir/emax-{uid}/ptyd.sock")),
+            "a per-user directory"
+        );
     }
 
     // ------------------------------------------------- snapshot and restore
@@ -565,7 +626,10 @@ mod tests {
 
     /// The id of the buffer called `name`.
     fn id_of(ed: &Editor, name: &str) -> BufferId {
-        ed.buffer_ids().into_iter().find(|&id| ed.find_buffer(id).unwrap().buf.name == name).unwrap_or_else(|| panic!("no buffer {name}"))
+        ed.buffer_ids()
+            .into_iter()
+            .find(|&id| ed.find_buffer(id).unwrap().buf.name == name)
+            .unwrap_or_else(|| panic!("no buffer {name}"))
     }
 
     fn name_of(ed: &Editor, id: BufferId) -> String {
@@ -671,10 +735,14 @@ mod tests {
         let mut fresh = Editor::new(Buffer::from_str("*scratch*", ";; welcome"));
         let changes = Rc::new(RefCell::new(0));
         let c = changes.clone();
-        fresh.hooks.add(EventKind::WindowConfigurationChanged, "count", Rc::new(move |_, _| {
-            *c.borrow_mut() += 1;
-            Ok(())
-        }));
+        fresh.hooks.add(
+            EventKind::WindowConfigurationChanged,
+            "count",
+            Rc::new(move |_, _| {
+                *c.borrow_mut() += 1;
+                Ok(())
+            }),
+        );
         assert!(fresh.restore_session_file(&path).unwrap());
         fresh.run_hooks();
         assert_eq!(*changes.borrow(), 1);
@@ -721,7 +789,12 @@ mod tests {
     fn restore_clamps_points_and_normalizes_ratios() {
         let s = SessionFile {
             version: SESSION_VERSION,
-            buffers: vec![SavedBuffer { id: 9, name: "t".into(), point: 1000, kind: SavedBufferKind::Text { text: "short".into() } }],
+            buffers: vec![SavedBuffer {
+                id: 9,
+                name: "t".into(),
+                point: 1000,
+                kind: SavedBufferKind::Text { text: "short".into() },
+            }],
             current_buffer: 9,
             tabs: vec![SavedTab {
                 name: None,
@@ -754,7 +827,12 @@ mod tests {
     fn malformed_layouts_are_refused_and_change_nothing() {
         let base = SessionFile {
             version: SESSION_VERSION,
-            buffers: vec![SavedBuffer { id: 1, name: "x".into(), point: 0, kind: SavedBufferKind::Text { text: "x".into() } }],
+            buffers: vec![SavedBuffer {
+                id: 1,
+                name: "x".into(),
+                point: 0,
+                kind: SavedBufferKind::Text { text: "x".into() },
+            }],
             current_buffer: 1,
             tabs: vec![SavedTab {
                 name: None,
@@ -784,7 +862,8 @@ mod tests {
         s.tabs[0].windows.push(SavedWindow { id: WindowId(2), buffer: 1, point: 0, scroll_line: 0 });
         bad.push((s, "one ratio per child"));
         let mut s = base.clone();
-        s.tabs[0].root = Node::Split { dir: SplitDir::Vertical, children: vec![leaf(1), leaf(2)], ratios: vec![1.0, -1.0] };
+        s.tabs[0].root =
+            Node::Split { dir: SplitDir::Vertical, children: vec![leaf(1), leaf(2)], ratios: vec![1.0, -1.0] };
         s.tabs[0].windows.push(SavedWindow { id: WindowId(2), buffer: 1, point: 0, scroll_line: 0 });
         bad.push((s, "positive"));
         let mut s = base.clone();
@@ -807,7 +886,13 @@ mod tests {
         let mut ed = Editor::new(Buffer::from_str("*scratch*", ""));
         assert!(!ed.restore_session_file(&path).unwrap(), "no file: nothing to do");
 
-        for content in ["{ not json", "", "{\"version\": 1}", "[1, 2, 3]", "{\"version\": 99, \"buffers\": [], \"current_buffer\": 1, \"tabs\": [], \"current_tab\": 0}"] {
+        for content in [
+            "{ not json",
+            "",
+            "{\"version\": 1}",
+            "[1, 2, 3]",
+            "{\"version\": 99, \"buffers\": [], \"current_buffer\": 1, \"tabs\": [], \"current_tab\": 0}",
+        ] {
             std::fs::write(&path, content).unwrap();
             let e = ed.restore_session_file(&path).unwrap_err();
             assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{content}: {e}");
@@ -830,7 +915,10 @@ mod tests {
         b.kind = BufferKind::Terminal;
         let id = ed.add_buffer(b);
         let spec = SpawnSpec { program: "/bin/zsh".into(), size: PtySize::new(100, 30), ..Default::default() };
-        ed.terminals.insert(id, TermState { term: Terminal::new(100, 30, 100), session, spec, mode: InputMode::Char, exited: None });
+        ed.terminals.insert(
+            id,
+            TermState { term: Terminal::new(100, 30, 100), session, spec, mode: InputMode::Char, exited: None },
+        );
         id
     }
 
@@ -868,9 +956,24 @@ mod tests {
         let saved = SessionFile {
             version: SESSION_VERSION,
             buffers: vec![
-                SavedBuffer { id: 1, name: "*scratch*".into(), point: 0, kind: SavedBufferKind::Text { text: String::new() } },
-                SavedBuffer { id: 2, name: "*term*".into(), point: 0, kind: SavedBufferKind::Terminal { session: live, spec: spec.clone() } },
-                SavedBuffer { id: 3, name: "*term*<2>".into(), point: 0, kind: SavedBufferKind::Terminal { session: SessionId(77), spec: spec.clone() } },
+                SavedBuffer {
+                    id: 1,
+                    name: "*scratch*".into(),
+                    point: 0,
+                    kind: SavedBufferKind::Text { text: String::new() },
+                },
+                SavedBuffer {
+                    id: 2,
+                    name: "*term*".into(),
+                    point: 0,
+                    kind: SavedBufferKind::Terminal { session: live, spec: spec.clone() },
+                },
+                SavedBuffer {
+                    id: 3,
+                    name: "*term*<2>".into(),
+                    point: 0,
+                    kind: SavedBufferKind::Terminal { session: SessionId(77), spec: spec.clone() },
+                },
             ],
             current_buffer: 1,
             tabs: vec![SavedTab {

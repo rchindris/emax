@@ -13,16 +13,16 @@
 //! swaps these over.
 //!
 //! The pure tree operations and geometry are in [`tree`]; the editor side
-//! (selecting windows, switching tabs) and the commands in [`ops`].
+//! (selecting windows, switching tabs) and the commands in `ops`.
 //!
 //! Invariants (see [`Layout::check`]): there is always at least one tab and
 //! each tab has at least one window; a tab's `selected` is one of its
 //! leaves; `Layout.windows` holds exactly the leaves of all tabs.
 
 mod ops;
-pub mod tree;
 #[cfg(test)]
 mod tests;
+pub mod tree;
 
 use std::collections::HashMap;
 
@@ -134,7 +134,13 @@ impl Layout {
         let id = WindowId(1);
         let mut windows = HashMap::new();
         windows.insert(id, Window::new(id, buffer));
-        Self { tabs: vec![Tab { name: None, root: Node::Leaf(id), selected: id }], current_tab: 0, windows, next_window_id: 2, frame: DEFAULT_FRAME }
+        Self {
+            tabs: vec![Tab { name: None, root: Node::Leaf(id), selected: id }],
+            current_tab: 0,
+            windows,
+            next_window_id: 2,
+            frame: DEFAULT_FRAME,
+        }
     }
 
     /// A fresh window id.
@@ -189,7 +195,11 @@ impl Layout {
     /// with [`restore_cursors`](Self::restore_cursors)).
     pub fn other_windows_cursors(&self, buf: BufferId) -> Vec<(WindowId, Vec<Cursor>)> {
         let selected = self.selected();
-        self.windows.values().filter(|w| w.buffer == buf && w.id != selected).map(|w| (w.id, w.cursors.clone())).collect()
+        self.windows
+            .values()
+            .filter(|w| w.buffer == buf && w.id != selected)
+            .map(|w| (w.id, w.cursors.clone()))
+            .collect()
     }
 
     /// Put back cursors saved by [`other_windows_cursors`](Self::other_windows_cursors)
@@ -283,4 +293,3 @@ impl Layout {
         Ok(())
     }
 }
-

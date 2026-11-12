@@ -6,7 +6,9 @@ use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use super::{ExitStatus, Notifier, PtyBackend, PtyEvent, PtySize, SessionId, SessionInfo, SpawnSpec, Waker, noop_waker};
+use super::{
+    ExitStatus, Notifier, PtyBackend, PtyEvent, PtySize, SessionId, SessionInfo, SpawnSpec, Waker, noop_waker,
+};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MockSession {

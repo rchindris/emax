@@ -342,10 +342,10 @@ impl Editor {
             }
             handled += 1;
             let mut handlers = Vec::new();
-            if let Event::Timer { id, name } = &e {
-                if let Some(cb) = self.hooks.timer_callback(*id) {
-                    handlers.push((name.clone(), cb));
-                }
+            if let Event::Timer { id, name } = &e
+                && let Some(cb) = self.hooks.timer_callback(*id)
+            {
+                handlers.push((name.clone(), cb));
             }
             handlers.extend(self.hooks.handlers_for(e.kind()));
             for (name, f) in handlers {
@@ -524,7 +524,10 @@ mod tests {
         let id = ed.add_buffer(Buffer::from_str("second", ""));
         ed.kill_buffer(id);
         ed.run_hooks();
-        assert_eq!(*l.borrow(), [Event::BufferCreated { buf: id }, Event::BufferKilled { buf: id, name: "second".into() }]);
+        assert_eq!(
+            *l.borrow(),
+            [Event::BufferCreated { buf: id }, Event::BufferKilled { buf: id, name: "second".into() }]
+        );
         l.borrow_mut().clear();
 
         // Killing the last buffer makes a fresh *scratch*: created, then the old one killed.
@@ -577,10 +580,10 @@ mod tests {
             EventKind::AfterCommand,
             "chain",
             Rc::new(|ed, e| {
-                if let Event::AfterCommand { name } = e {
-                    if name == "end-of-buffer" {
-                        ed.execute("backward-char", Args::default());
-                    }
+                if let Event::AfterCommand { name } = e
+                    && name == "end-of-buffer"
+                {
+                    ed.execute("backward-char", Args::default());
                 }
                 Ok(())
             }),
@@ -749,10 +752,10 @@ mod tests {
             ms(1),
             Some(Rc::new(move |ed, e| {
                 *r.borrow_mut() += 1;
-                if *r.borrow() == 2 {
-                    if let Event::Timer { id, .. } = e {
-                        ed.hooks.cancel_timer(*id);
-                    }
+                if *r.borrow() == 2
+                    && let Event::Timer { id, .. } = e
+                {
+                    ed.hooks.cancel_timer(*id);
                 }
                 Ok(())
             })),

@@ -44,12 +44,12 @@ fn with_meta(meta: bool, mut body: Vec<u8>) -> Vec<u8> {
 /// A key named by one character: Ctrl turns it into a control code;
 /// otherwise it sends the text it types.
 fn char_key(key: &Key, c: char) -> Option<Vec<u8>> {
-    if key.ctrl {
-        if let Some(code) = control_code(c) {
-            return Some(vec![code]);
-        }
-        // xterm sends the plain character for Ctrl chords without a control code.
+    if key.ctrl
+        && let Some(code) = control_code(c)
+    {
+        return Some(vec![code]);
     }
+    // xterm sends the plain character for Ctrl chords without a control code.
     // With Ctrl or Meta the platform's text is unreliable (macOS Option
     // types `å` for M-a), so the key name decides; Shift capitalises it.
     let text = if key.ctrl || key.meta {
@@ -261,8 +261,8 @@ mod tests {
     #[test]
     fn function_keys() {
         let want = [
-            "\x1bOP", "\x1bOQ", "\x1bOR", "\x1bOS", "\x1b[15~", "\x1b[17~", "\x1b[18~", "\x1b[19~", "\x1b[20~", "\x1b[21~",
-            "\x1b[23~", "\x1b[24~",
+            "\x1bOP", "\x1bOQ", "\x1bOR", "\x1bOS", "\x1b[15~", "\x1b[17~", "\x1b[18~", "\x1b[19~", "\x1b[20~",
+            "\x1b[21~", "\x1b[23~", "\x1b[24~",
         ];
         for (i, w) in want.iter().enumerate() {
             let k = format!("<f{}>", i + 1);
@@ -291,7 +291,10 @@ mod tests {
 
     #[test]
     fn every_parsed_key_encodes_without_panicking() {
-        let names = ["a", "Z", "0", "-", "SPC", "RET", "TAB", "DEL", "ESC", "<up>", "<f1>", "<f12>", "<home>", "<prior>", "é", ""];
+        let names = [
+            "a", "Z", "0", "-", "SPC", "RET", "TAB", "DEL", "ESC", "<up>", "<f1>", "<f12>", "<home>", "<prior>", "é",
+            "",
+        ];
         for mods in ["", "C-", "M-", "S-", "s-", "C-M-", "C-M-S-", "C-M-S-s-"] {
             for n in names {
                 for modes in [Modes::default(), Modes { app_cursor: true, bracketed_paste: true, ..Modes::default() }] {

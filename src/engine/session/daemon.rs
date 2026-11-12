@@ -40,9 +40,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::protocol::{
-    ClientMsg, DaemonMsg, MAX_OUTPUT_CHUNK, Op, PROTOCOL_VERSION, Reply, encode_frame, read_frame,
-};
+use super::protocol::{ClientMsg, DaemonMsg, MAX_OUTPUT_CHUNK, Op, PROTOCOL_VERSION, Reply, encode_frame, read_frame};
 use crate::engine::pty::local::LocalBackend;
 use crate::engine::pty::{ExitStatus, PtyBackend, PtyEvent, PtySize, SessionId, SessionInfo, SpawnSpec, Waker};
 
@@ -145,13 +143,19 @@ pub fn bind(path: &Path) -> io::Result<Bound> {
     match fs::symlink_metadata(path) {
         Ok(m) if m.file_type().is_socket() => {
             if is_live(path) {
-                return Err(io::Error::new(io::ErrorKind::AddrInUse, format!("a daemon is already listening on {}", path.display())));
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    format!("a daemon is already listening on {}", path.display()),
+                ));
             }
             // Nobody listens: left behind by a daemon that died.
             fs::remove_file(path)?;
         }
         Ok(_) => {
-            return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} exists and is not a socket", path.display())));
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{} exists and is not a socket", path.display()),
+            ));
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
@@ -187,7 +191,9 @@ fn prepare_dir(dir: &Path) -> io::Result<()> {
             fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
         }
         Err(e) => Err(e),
-        Ok(m) if !m.is_dir() => Err(io::Error::new(io::ErrorKind::NotADirectory, format!("{} is not a directory", dir.display()))),
+        Ok(m) if !m.is_dir() => {
+            Err(io::Error::new(io::ErrorKind::NotADirectory, format!("{} is not a directory", dir.display())))
+        }
         Ok(m) => {
             // SAFETY: getuid has no preconditions and cannot fail.
             let uid = unsafe { libc::getuid() };
@@ -208,7 +214,13 @@ fn prepare_dir(dir: &Path) -> io::Result<()> {
 
 /// The user id of the process at the other end of a Unix socket.
 pub fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
-    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
     {
         let (mut uid, mut gid) = (0, 0);
         // SAFETY: a valid socket descriptor and pointers to two locals.
@@ -217,7 +229,13 @@ pub fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
         }
         Ok(uid)
     }
-    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd")))]
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    )))]
     {
         let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
         let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
@@ -281,7 +299,11 @@ pub fn run_with(opts: DaemonOptions, make_backend: impl FnOnce(Waker) -> Box<dyn
 
 /// Serve on an already bound socket (`main` binds before detaching, so bind
 /// errors reach the starter). Blocks.
-pub fn serve(bound: Bound, opts: &DaemonOptions, make_backend: impl FnOnce(Waker) -> Box<dyn PtyBackend>) -> io::Result<()> {
+pub fn serve(
+    bound: Bound,
+    opts: &DaemonOptions,
+    make_backend: impl FnOnce(Waker) -> Box<dyn PtyBackend>,
+) -> io::Result<()> {
     let (tx, rx) = mpsc::channel();
     let wake = tx.clone();
     let backend = make_backend(Arc::new(move || {
@@ -439,10 +461,12 @@ impl Daemon {
         let mut idle_since = Some(Instant::now());
         while !self.stop {
             let input = match (idle_exit, idle_since) {
-                (Some(limit), Some(since)) => match rx.recv_timeout((since + limit).saturating_duration_since(Instant::now())) {
-                    Ok(i) => i,
-                    Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => return,
-                },
+                (Some(limit), Some(since)) => {
+                    match rx.recv_timeout((since + limit).saturating_duration_since(Instant::now())) {
+                        Ok(i) => i,
+                        Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => return,
+                    }
+                }
                 _ => match rx.recv() {
                     Ok(i) => i,
                     Err(_) => return,
@@ -558,7 +582,10 @@ impl Daemon {
         let size = spec.size;
         let mut clients = BTreeSet::new();
         clients.insert(conn);
-        self.sessions.insert(id, Session { spec, size, ring: Ring::new(self.replay_bytes), exited: None, clients, paused: false });
+        self.sessions.insert(
+            id,
+            Session { spec, size, ring: Ring::new(self.replay_bytes), exited: None, clients, paused: false },
+        );
         Ok(Reply::Spawned(id))
     }
 
@@ -621,7 +648,9 @@ impl Daemon {
         let Daemon { sessions, conns, backend, .. } = self;
         for (id, s) in sessions.iter_mut() {
             let behind = s.exited.is_none()
-                && s.clients.iter().any(|c| conns.get(c).is_some_and(|c| c.queued.load(Ordering::Acquire) >= HIGH_WATER));
+                && s.clients
+                    .iter()
+                    .any(|c| conns.get(c).is_some_and(|c| c.queued.load(Ordering::Acquire) >= HIGH_WATER));
             if behind != s.paused {
                 s.paused = behind;
                 let _ = backend.pause_output(*id, behind);
@@ -693,7 +722,11 @@ pub struct Cli {
 /// (`--idle-exit 0`, the default, means never).
 pub fn parse_args(args: &[String]) -> Result<Cli, String> {
     let mut cli = Cli {
-        opts: DaemonOptions { socket: super::default_socket_path(), replay_bytes: DEFAULT_REPLAY_BYTES, idle_exit: None },
+        opts: DaemonOptions {
+            socket: super::default_socket_path(),
+            replay_bytes: DEFAULT_REPLAY_BYTES,
+            idle_exit: None,
+        },
         foreground: false,
     };
     let mut it = args.iter();
@@ -856,7 +889,15 @@ mod tests {
 
     fn daemon(backend: Box<dyn PtyBackend>) -> (Daemon, Receiver<Input>) {
         let (tx, rx) = mpsc::channel();
-        let d = Daemon { backend, sessions: BTreeMap::new(), conns: HashMap::new(), replay_bytes: 100, tx, more: false, stop: false };
+        let d = Daemon {
+            backend,
+            sessions: BTreeMap::new(),
+            conns: HashMap::new(),
+            replay_bytes: 100,
+            tx,
+            more: false,
+            stop: false,
+        };
         (d, rx)
     }
 

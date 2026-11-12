@@ -1,8 +1,8 @@
 //! Behavioural tests: drive the editor through real key sequences.
 //! In buffer strings, `|` marks a cursor (several `|` = several cursors).
 
-use super::*;
 use super::cursor::Cursor;
+use super::*;
 
 struct T {
     ed: Editor,
@@ -54,10 +54,10 @@ impl T {
     fn key(&mut self, k: Key) {
         if self.ed.picker.is_some() {
             self.ed.picker_key(&self.picker_keys, &k);
-            if let Some((cmd, args)) = self.ed.pending_command.take() {
-                if let Outcome::Run(cmd, args) = self.d.invoke(cmd, args) {
-                    self.ed.execute(cmd, args);
-                }
+            if let Some((cmd, args)) = self.ed.pending_command.take()
+                && let Outcome::Run(cmd, args) = self.d.invoke(cmd, args)
+            {
+                self.ed.execute(cmd, args);
             }
         } else if self.ed.swiper.is_some() {
             self.ed.swiper_key(&self.search_keys, &k);
@@ -385,8 +385,14 @@ fn switch_buffer_picker_default_is_other_buffer() {
     let mut x = three_buffers();
     x.keys("C-x b");
     assert!(x.ed.picker.is_some());
-    let labels: Vec<_> = x.ed.picker.as_ref().unwrap().matches.iter()
-        .map(|m| x.ed.picker.as_ref().unwrap().candidates[m.index].label.clone()).collect();
+    let labels: Vec<_> =
+        x.ed.picker
+            .as_ref()
+            .unwrap()
+            .matches
+            .iter()
+            .map(|m| x.ed.picker.as_ref().unwrap().candidates[m.index].label.clone())
+            .collect();
     assert_eq!(labels, ["notes.md", "editor.rs", "main.rs"]);
     x.keys("RET");
     assert!(x.ed.picker.is_none());
@@ -470,7 +476,8 @@ fn killing_last_buffer_leaves_scratch_and_names_are_unique() {
 
 // ------------------------------------------------------------------ search
 
-const HAYSTACK: &str = "fn main() {\n    let foo = 1;\n|    let bar = foo + 2;\n    println!(\"{foo} {bar}\");\n}\n// Foo is done\n";
+const HAYSTACK: &str =
+    "fn main() {\n    let foo = 1;\n|    let bar = foo + 2;\n    println!(\"{foo} {bar}\");\n}\n// Foo is done\n";
 
 fn swiper_lines(x: &T) -> Vec<usize> {
     x.ed.swiper.as_ref().unwrap().matches.clone()
@@ -506,10 +513,10 @@ fn swiper_terms_are_orderless_and_smart_case() {
     x.typ("Foo");
     assert_eq!(swiper_lines(&x), [5]);
     let s = x.ed.swiper.as_ref().unwrap();
-    assert_eq!(s.highlights(5), [3..6]);
+    assert_eq!(s.highlights(5), vec![3..6]);
     x.keys("DEL DEL DEL");
     x.typ("o");
-    assert_eq!(x.ed.swiper.as_ref().unwrap().highlights(3), [16..18]); // merged "o" "o"
+    assert_eq!(x.ed.swiper.as_ref().unwrap().highlights(3), vec![16..18]); // merged "o" "o"
 }
 
 #[test]
@@ -798,4 +805,293 @@ fn execute_extended_command() {
     assert!(x.ed.picker.is_some());
     x.keys("C-g");
     assert!(x.ed.picker.is_none());
+}
+
+fn file_picker_labels(x: &T) -> Vec<String> {
+    let p = x.ed.picker.as_ref().expect("picker open");
+    p.matches.iter().map(|m| p.candidates[m.index].label.clone()).collect()
+}
+
+/// A directory with `src/main.rs`, `README.md` and a hidden file, and an
+/// editor whose current buffer visits a file in it.
+fn file_tree() -> (T, std::path::PathBuf) {
+    let d = super::testutil::temp_dir("ff");
+    std::fs::create_dir(d.join("src")).unwrap();
+    std::fs::write(d.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(d.join("README.md"), "readme\n").unwrap();
+    std::fs::write(d.join(".hidden"), "").unwrap();
+    let mut x = t("|");
+    x.ed.buf.path = Some(d.join("notes.txt"));
+    (x, d)
+}
+
+#[test]
+fn find_file_navigates_and_opens() {
+    let (mut x, d) = file_tree();
+    x.keys("C-x C-f");
+    let q = x.ed.picker.as_ref().unwrap().query.clone();
+    assert_eq!(q, format!("{}/", d.display())); // starts in the buffer's directory
+    // Directories first, hidden entries last.
+    assert_eq!(file_picker_labels(&x), ["src/", "README.md", ".hidden"]);
+    // RET on a directory enters it; the last component filters.
+    x.typ("sr").keys("RET");
+    assert_eq!(x.ed.picker.as_ref().unwrap().query, format!("{}/src/", d.display()));
+    assert_eq!(file_picker_labels(&x), ["main.rs"]);
+    x.typ("mn").keys("RET");
+    assert!(x.ed.picker.is_none());
+    assert_eq!(x.ed.buf.name, "main.rs");
+    assert_eq!(x.ed.rope().to_string(), "fn main() {}\n");
+    // Visiting it again switches to the same buffer.
+    let n = x.ed.buffer_count();
+    x.keys("C-x d").typ("main").keys("RET");
+    assert_eq!(x.ed.buffer_count(), n);
+    assert_eq!(x.ed.buf.name, "main.rs");
+    std::fs::remove_dir_all(d).unwrap();
+}
+
+#[test]
+fn find_file_editing_the_path() {
+    let (mut x, d) = file_tree();
+    x.keys("C-x C-f").typ("src/");
+    assert_eq!(file_picker_labels(&x), ["main.rs"]);
+    // DEL after a `/` goes up a directory; M-DEL clears the typed component.
+    x.keys("DEL");
+    assert_eq!(x.ed.picker.as_ref().unwrap().query, format!("{}/", d.display()));
+    assert_eq!(file_picker_labels(&x).len(), 3);
+    x.typ("REA").keys("M-DEL");
+    assert_eq!(x.ed.picker.as_ref().unwrap().query, format!("{}/", d.display()));
+    // `//` restarts at the root.
+    x.typ("/");
+    assert_eq!(x.ed.picker.as_ref().unwrap().query, "/");
+    x.keys("C-g");
+    assert!(x.ed.picker.is_none());
+    std::fs::remove_dir_all(d).unwrap();
+}
+
+#[test]
+fn find_file_creates_new_files() {
+    let (mut x, d) = file_tree();
+    // No match: RET starts a new file; C-j uses the path as typed even if it matches.
+    x.keys("C-x C-f").typ("todo.txt").keys("RET");
+    assert_eq!(x.ed.buf.name, "todo.txt");
+    assert_eq!(x.ed.buf.path.as_deref(), Some(d.join("todo.txt").as_path()));
+    assert_eq!(x.ed.message.as_deref(), Some("(New file)"));
+    x.keys("C-x C-f").typ("READ").keys("C-j");
+    assert_eq!(x.ed.buf.name, "READ");
+    // A directory typed literally is entered, not opened.
+    x.keys("C-x C-f").typ("src").keys("C-j");
+    assert_eq!(x.ed.picker.as_ref().unwrap().query, format!("{}/src/", d.display()));
+    std::fs::remove_dir_all(d).unwrap();
+}
+
+#[test]
+fn save_buffer_without_a_file_asks_for_one() {
+    let d = super::testutil::temp_dir("save");
+    let mut x = t("hello|");
+    assert!(x.ed.buf.path.is_none());
+    x.keys("C-x C-s");
+    let p = x.ed.picker.as_ref().expect("save picker open");
+    assert_eq!(p.prompt, "Save buffer to");
+    assert!(p.saving());
+    // `//` restarts the path at the root, so an absolute path can be typed.
+    x.typ(&format!("/{}/notes.rs", d.display())).keys("RET");
+    assert!(x.ed.picker.is_none());
+    let file = d.join("notes.rs");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello");
+    // The buffer now visits the file: renamed, unmodified, in the file's mode.
+    assert_eq!(x.ed.buf.path.as_deref(), Some(file.as_path()));
+    assert_eq!(x.ed.buf.name, "notes.rs");
+    assert!(!x.ed.buf.modified());
+    assert_eq!(x.ed.major_mode(), "rust-mode");
+    assert_eq!(x.ed.message.as_deref(), Some(format!("Wrote {}", file.display()).as_str()));
+    // Later saves go straight to the file.
+    x.typ("!").keys("C-x C-s");
+    assert!(x.ed.picker.is_none());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello!");
+    std::fs::remove_dir_all(d).unwrap();
+}
+
+#[test]
+fn save_buffer_confirms_overwriting_and_rejects_missing_directories() {
+    let d = super::testutil::temp_dir("save");
+    let file = d.join("old.txt");
+    std::fs::write(&file, "old").unwrap();
+    let mut x = t("new|");
+    x.keys("C-x C-s").typ(&format!("/{}/nope/a.txt", d.display())).keys("RET");
+    let msg = x.ed.picker.as_ref().unwrap().message.clone().unwrap();
+    assert!(msg.contains("does not exist"), "{msg}");
+    assert!(x.ed.buf.path.is_none());
+    x.keys("C-g").keys("C-x C-s").typ(&format!("/{}/old.txt", d.display())).keys("C-j");
+    // The first accept only warns; the second overwrites.
+    let msg = x.ed.picker.as_ref().unwrap().message.clone().unwrap();
+    assert!(msg.contains("exists"), "{msg}");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "old");
+    x.keys("C-j");
+    assert!(x.ed.picker.is_none());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "new");
+    assert_eq!(x.ed.buf.name, "old.txt");
+    std::fs::remove_dir_all(d).unwrap();
+}
+
+// ================================================================ dired
+
+/// The file name on the line at point in a listing.
+fn dired_at(x: &T) -> String {
+    let r = &x.ed.buf.rope;
+    let p = x.ed.primary_cursor().point;
+    let line = r.line(r.char_to_line(p)).to_string();
+    assert_eq!(p - r.line_to_char(r.char_to_line(p)), dired::NAME_COL, "point is on the name");
+    line.chars().skip(dired::NAME_COL).collect::<String>().trim_end().to_string()
+}
+
+fn dired_names(x: &T) -> Vec<String> {
+    x.ed.dired_state().expect("a listing").entries.iter().map(|e| e.name.clone()).collect()
+}
+
+#[test]
+fn dired_lists_visits_and_goes_up() {
+    let (mut x, d) = file_tree();
+    x.keys("C-x d");
+    assert_eq!(x.ed.picker.as_ref().unwrap().prompt, "Dired");
+    // RET with nothing typed lists the directory typed.
+    x.keys("RET");
+    assert!(x.ed.picker.is_none());
+    let dir_name = format!("{}/", d.file_name().unwrap().to_string_lossy());
+    assert_eq!(x.ed.buf.name, dir_name);
+    assert_eq!(x.ed.buf.kind, BufferKind::Dired);
+    assert_eq!(x.ed.major_mode(), "dired-mode");
+    assert!(x.ed.minor_on(MinorMode::ReadOnly));
+    assert_eq!(dired_names(&x), ["..", "src", ".hidden", "README.md"]);
+    assert!(x.ed.buf.rope.line(0).to_string().contains(&*d.file_name().unwrap().to_string_lossy()));
+    // Point starts on the first entry after `..`.
+    assert_eq!(dired_at(&x), "src");
+    // The listing can't be typed into.
+    let before = x.ed.buf.rope.to_string();
+    x.typ("a");
+    assert_eq!(x.ed.buf.rope.to_string(), before);
+    assert!(!x.ed.buf.modified());
+    // Visit a file, then jump back to its entry.
+    x.keys("n n");
+    assert_eq!(dired_at(&x), "README.md");
+    x.keys("RET");
+    assert_eq!(x.ed.buf.name, "README.md");
+    x.keys("C-x C-j");
+    assert_eq!(x.ed.buf.name, dir_name);
+    assert_eq!(dired_at(&x), "README.md");
+    // Into a subdirectory and back up: point returns to it.
+    x.keys("M-< p p p p n");
+    assert_eq!(dired_at(&x), "src");
+    x.keys("RET");
+    assert_eq!(x.ed.buf.name, "src/");
+    assert_eq!(dired_at(&x), "main.rs");
+    assert_eq!(x.ed.default_directory(), d.join("src"));
+    x.keys("^");
+    assert_eq!(x.ed.buf.name, dir_name);
+    assert_eq!(dired_at(&x), "src");
+    // Listings are reused, not duplicated.
+    x.keys("RET ^");
+    assert_eq!(x.names().iter().filter(|n| **n == dir_name).count(), 1);
+    // find-file on a directory typed with a slash lists it.
+    x.keys("C-x C-f").typ("src/").keys("C-j");
+    assert_eq!(x.ed.buf.name, "src/");
+    // q buries the listing.
+    x.keys("q");
+    assert_ne!(x.ed.buf.name, "src/");
+    std::fs::remove_dir_all(d).unwrap();
+}
+
+#[test]
+fn dired_marks_flags_and_deletes() {
+    let (mut x, d) = file_tree();
+    std::fs::write(d.join("a.txt"), "a").unwrap();
+    std::fs::write(d.join("b.txt"), "b").unwrap();
+    x.keys("C-x d RET");
+    assert_eq!(dired_names(&x), ["..", "src", ".hidden", "a.txt", "b.txt", "README.md"]);
+    // m marks and moves down; the mark shows in the first column.
+    x.keys("n n m");
+    assert_eq!(dired_at(&x), "b.txt");
+    let line = |x: &T, n: usize| x.ed.buf.rope.line(n).to_string();
+    assert!(line(&x, 4).starts_with("* "), "{}", line(&x, 4));
+    // `..` can't be marked; U clears every mark; t toggles.
+    x.keys("M-< n m");
+    assert_eq!(x.msg(), "Can't mark ..");
+    x.keys("S-u");
+    assert!(x.ed.dired_state().unwrap().entries.iter().all(|e| e.mark == ' '));
+    x.keys("t");
+    assert_eq!(x.ed.dired_state().unwrap().entries.iter().filter(|e| e.mark == '*').count(), 5);
+    x.keys("S-u");
+    // d flags; x asks first, deletes when repeated, and asks again next time.
+    x.keys("M-< n n n n d");
+    assert!(line(&x, 4).starts_with("D "));
+    x.keys("x");
+    assert!(x.msg().contains("Delete 1 file (a.txt)"), "{}", x.msg());
+    assert!(d.join("a.txt").exists());
+    x.keys("x");
+    assert!(!d.join("a.txt").exists());
+    assert_eq!(x.msg(), "Deleted 1 file");
+    assert_eq!(dired_names(&x), ["..", "src", ".hidden", "b.txt", "README.md"]);
+    // D deletes the entry at point (a directory recursively), after a repeat;
+    // anything in between cancels.
+    x.keys("M-< n n");
+    assert_eq!(dired_at(&x), "src");
+    x.keys("S-d");
+    assert!(x.msg().contains("recursively"), "{}", x.msg());
+    x.keys("g S-d");
+    assert!(d.join("src").exists());
+    x.keys("S-d");
+    assert!(!d.join("src").exists());
+    assert_eq!(dired_names(&x), ["..", ".hidden", "b.txt", "README.md"]);
+    std::fs::remove_dir_all(d).unwrap();
+}
+
+#[test]
+fn dired_renames_copies_and_creates_directories() {
+    let (mut x, d) = file_tree();
+    x.keys("C-x C-f").typ("README.md").keys("RET");
+    assert_eq!(x.ed.buf.name, "README.md");
+    x.keys("C-x C-j");
+    // + creates a directory and puts point on it.
+    x.keys("+");
+    assert_eq!(x.ed.picker.as_ref().unwrap().prompt, "Create directory");
+    x.typ("docs").keys("RET");
+    assert!(d.join("docs").is_dir());
+    assert_eq!(dired_at(&x), "docs");
+    // C copies the file at point; the target is taken as typed.
+    x.keys("M-9 n");
+    assert_eq!(dired_at(&x), "README.md");
+    x.keys("S-c");
+    assert_eq!(x.ed.picker.as_ref().unwrap().prompt, "Copy README.md to");
+    x.typ("R").keys("RET");
+    assert_eq!(std::fs::read_to_string(d.join("R")).unwrap(), "readme\n");
+    assert_eq!(dired_at(&x), "R");
+    // Overwriting needs a second RET.
+    x.keys("S-c").typ("README.md").keys("RET");
+    assert!(x.ed.picker.as_ref().unwrap().message.as_deref().unwrap().contains("exists"));
+    x.keys("RET");
+    assert!(x.ed.picker.is_none());
+    // R renames; a buffer visiting the file follows it.
+    x.keys("M-9 n");
+    assert_eq!(dired_at(&x), "README.md");
+    x.keys("S-r").typ("INTRO.md").keys("RET");
+    assert!(!d.join("README.md").exists());
+    assert!(d.join("INTRO.md").exists());
+    assert!(x.names().contains(&"INTRO.md".to_string()), "{:?}", x.names());
+    let visitor = x.ed.others.iter().find(|s| s.buf.name == "INTRO.md").unwrap();
+    assert_eq!(visitor.buf.path.as_deref(), Some(d.join("INTRO.md").as_path()));
+    // Marked files move into a directory.
+    x.keys("M-< n");
+    while dired_at(&x) != "INTRO.md" {
+        x.keys("n");
+    }
+    x.keys("m m");
+    x.keys("S-r");
+    assert_eq!(x.ed.picker.as_ref().unwrap().prompt, "Rename 2 files to");
+    x.typ("docs").keys("RET");
+    assert!(d.join("docs/INTRO.md").exists() && d.join("docs/R").exists());
+    assert_eq!(x.msg(), "Moved 2 files");
+    assert!(x.ed.dired_state().unwrap().entries.iter().all(|e| e.mark == ' '));
+    // The session remembers listings.
+    let s = x.ed.session_snapshot();
+    assert!(s.buffers.iter().any(|b| b.kind == session::SavedBufferKind::Directory { path: d.clone() }));
+    std::fs::remove_dir_all(d).unwrap();
 }

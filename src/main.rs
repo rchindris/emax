@@ -27,7 +27,8 @@ const SCRATCH: &str = ";; This buffer is for text that is not saved.
 ;; Args       C-u, C-u C-u, C-u 12, M-5, M--
 ;; Buffers    C-x b  switch (fuzzy, live preview; C-j create, C-k kill)
 ;;            C-x C-b  same   C-x <left>/<right> cycle   C-x k kill
-;; Files      C-x C-s save   C-x C-c quit
+;; Files      C-x C-f open (type a path; RET enters a directory, DEL goes up)
+;;            C-x C-s save   C-x C-c quit
 ;; Commands   M-x  run any command by name (fuzzy), e.g. rust-mode, auto-fill-mode
 ;; Modes      C-x C-q read-only   <insert> overwrite   M-x <mode> to switch or toggle
 ;;
@@ -57,21 +58,14 @@ fn main() {
     for w in &config.warnings {
         eprintln!("emax: config: {w}");
     }
-    let open = |p: &PathBuf| {
-        Buffer::open(p.clone()).unwrap_or_else(|e| {
-            eprintln!("emax: {}: {e}", p.display());
+    let mut ed = Editor::new(Buffer::from_str("*scratch*", SCRATCH));
+    // Like Emacs, there is always a *scratch* buffer; files keep command-line
+    // order (the first is current) and directories are listed.
+    for p in paths.iter().rev() {
+        let r = if p.is_dir() { ed.dired(p) } else { ed.find_file(p) };
+        if let Err(e) = r {
+            eprintln!("emax: {e}");
             std::process::exit(1)
-        })
-    };
-    let mut ed = match paths.first() {
-        Some(p) => Editor::new(open(p)),
-        None => Editor::new(Buffer::from_str("*scratch*", SCRATCH)),
-    };
-    if !paths.is_empty() {
-        // Like Emacs, there is always a *scratch* buffer; files keep command-line order.
-        ed.add_buffer(Buffer::from_str("*scratch*", SCRATCH));
-        for p in paths[1..].iter().rev() {
-            ed.add_buffer(open(p));
         }
     }
     ed.set_modes(Arc::new(config.modes));

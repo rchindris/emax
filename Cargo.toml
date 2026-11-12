@@ -2,7 +2,11 @@
 name = "emax"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT"
+description = "A fast, GPU-rendered editor with Emacs keys"
+repository = "https://github.com/rchindris/emax"
+readme = "README.md"
 
 [dependencies]
 alacritty_terminal = "0.26.0"
@@ -13,9 +17,28 @@ portable-pty = "0.9.0"
 postcard = { version = "1.1.3", features = ["use-std"] }
 ropey = "1.6.1"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+streaming-iterator = "0.1"
+tree-sitter = "0.26"
+tree-sitter-json = "0.24"
+tree-sitter-language = "0.1.7"
+tree-sitter-rust = "0.24"
 
 # Optimise dependencies (GPUI, ropey) even in debug builds so `cargo run` stays snappy;
 # our own crate keeps fast incremental compiles and full debug info.
 [profile.dev.package."*"]
 opt-level = 3
+
+# `cargo deb` (used by the release workflow) builds the Debian package from this.
+[package.metadata.deb]
+maintainer = "Radu Chindris <radu.chindris@uzina-software.com>"
+section = "editors"
+extended-description = """\
+emax keeps Emacs' editing model and key bindings, rendered on the GPU with GPUI
+and backed by a rope. It is not an Emacs Lisp clone."""
+depends = "$auto"
+assets = [
+  ["target/release/emax", "usr/bin/", "755"],
+  ["README.md", "usr/share/doc/emax/", "644"],
+  ["LICENSE", "usr/share/doc/emax/copyright", "644"],
+]

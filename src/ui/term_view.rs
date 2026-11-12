@@ -30,12 +30,7 @@ pub fn measure_cell_width(window: &Window, family: impl Into<SharedString>, font
 pub fn render_terminal(snap: &Snapshot, cell_w: f32, line_h: f32) -> AnyElement {
     let rows = (0..snap.rows).map(|r| {
         let runs = snap.row_runs(r).into_iter().filter(|run| !run.is_blank(snap.background));
-        div()
-            .relative()
-            .flex_none()
-            .w_full()
-            .h(px(line_h))
-            .children(runs.map(|run| render_run(run, cell_w, line_h)))
+        div().relative().flex_none().w_full().h(px(line_h)).children(runs.map(|run| render_run(run, cell_w, line_h)))
     });
     div()
         .relative()

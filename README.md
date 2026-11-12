@@ -14,6 +14,8 @@ without the Emacs runtime.
 - **GPU-rendered UI.** Lines are virtualised, so large files stay responsive.
   The window has a mode line and an echo area.
 - **Rope-backed buffers** with grouped undo/redo.
+- **Syntax highlighting** with tree-sitter (Rust and JSON so far). Edits
+  re-parse incrementally, and only the lines on screen are highlighted.
 - **Emacs key bindings.** Prefix keys (`C-x …`), prefix arguments (`C-u`,
   `C-u 12`, `M-5`, `M--`), shift-selection and transient mark.
 - **Structural motion** by word, sentence, paragraph and balanced expression (sexp).
@@ -24,6 +26,8 @@ without the Emacs runtime.
   previewed in the buffer as you move through it. Space-separated terms match
   in any order, with smart case.
 - **Multiple buffers** with a fuzzy-filtering switcher (`C-x b`).
+- **Dired** (`C-x d`): a directory listing to visit, mark, flag, delete,
+  rename, copy and create files and directories, with Emacs' keys.
 - **Major and minor modes.** Every buffer has one major mode (`rust-mode`,
   `markdown-mode`, …), chosen from a `-*- mode -*-` marker, the `#!` line or
   the file name, plus any number of minor modes (`auto-fill-mode`,
@@ -32,9 +36,21 @@ without the Emacs runtime.
 - **Commands use their GNU Emacs names** (`forward-sexp`, `kill-ring-save`, …).
   `M-x` runs any of them by name, with fuzzy matching.
 
+## Installing
+
+On macOS (Apple Silicon or Intel) with Homebrew:
+
+```sh
+brew install rchindris/emax/emax
+```
+
+On Debian and Ubuntu, download the `.deb` for your architecture from the
+[latest release](https://github.com/rchindris/emax/releases/latest) and run
+`sudo apt install ./emax_*.deb`.
+
 ## Building and running
 
-emax needs a recent stable Rust toolchain (edition 2024, so Rust 1.85 or newer).
+emax needs a recent stable Rust toolchain (Rust 1.88 or newer).
 
 ```sh
 cargo run --release               # opens a *scratch* buffer with a key cheat sheet
@@ -68,8 +84,10 @@ shortcuts (`s-c`, `s-v`, `s-x`, `s-z`, `s-s`, `s-a`, `s-q`) also work.
 | Multiple cursors | `C->` `C-<` (next/previous like this), `C-c C-<` (all like this), `C-S-c C-S-c` (one per line), `C-g` (back to one cursor) |
 | Search | `C-s` (`s-f`) search, `C-r` search backward; inside: `C-s`/`C-r` next/previous, `RET` jump, `C-g` cancel, `M-n` symbol at point, `C-s C-s` repeat the last search |
 | Buffers | `C-x b` `C-x C-b` `C-x <left>` `C-x <right>` `C-x k` |
-| Files | `C-x C-s` (save), `C-x C-c` (quit) |
+| Files | `C-x C-f` (open: type a path, fuzzy completion), `C-x C-s` (save; asks for a file name if the buffer has none), `C-x C-c` (quit) |
+| Dired | `C-x d` (list a directory), `C-x C-j` (list the current file's directory); inside: `RET` visit, `o` in other window, `^` up, `n`/`p` move, `m` mark, `u`/`DEL` unmark, `U` unmark all, `t` toggle marks, `d` flag, `x` delete flagged, `D` delete, `R` rename/move, `C` copy, `+` new directory, `g` refresh, `s` sort by name/date, `w` copy names, `q` bury. Deleting asks you to repeat the key to confirm. |
 | Commands | `M-x` (run a command by name; `C-u M-x` passes the prefix argument on) |
+| Settings | `s-,` (Cmd-,) opens the settings editor; `M-x open-settings-json` visits the settings file |
 | Modes | `C-x C-q` (read-only), `<insert>` (overwrite); `M-x rust-mode` etc. switch the major mode |
 
 These are the default bindings. The full set is in
@@ -86,6 +104,14 @@ of these that is set:
 1. `$EMAX_CONFIG`
 2. `$XDG_CONFIG_HOME/emax/config.json`
 3. `~/.config/emax/config.json`
+
+The easiest way to change settings is the settings editor, `s-,` (Cmd-,), which
+works like VS Code's: search settings by name or description (`@modified` lists
+the ones you have changed), then `RET` to edit, toggle or choose a value, `C-k`
+to reset one to its default, `TAB` to jump between sections, and `C-o` to open
+the file itself. Changes are written to your file at once and apply right away;
+so does saving the file from a buffer. Key bindings, modes and theme colors are
+edited in the file.
 
 Your file only needs what you want to change. Settings replace the defaults.
 Keymap entries are added to the default keymaps and replace any binding for the
@@ -169,6 +195,7 @@ A major mode is defined like this; every field is optional:
 | `parent` | Mode to inherit from: its settings, keymap and minor modes apply unless this mode overrides them (`""` removes an inherited parent) |
 | `files` | File name patterns with `*` and `?`; lowercase patterns ignore case |
 | `interpreters` | Programs on a `#!` line that select the mode (trailing version numbers are ignored, so `python` matches `python3`) |
+| `syntax` | Language to highlight with, inherited from the parent (`""` turns it off). Built in: `rust`, `json` |
 | `editor` | `fill_column` and `tab_width` for buffers in this mode |
 | `minor_modes` | Minor modes to turn on, after the parent's (Emacs' mode hooks) |
 | `keymap` | Bindings that apply in this mode, over the parent's and the global ones |
@@ -219,11 +246,24 @@ so you only list what differs:
 A theme that doesn't `inherit` should define every color. Any color it leaves
 out is taken from `emax-dark`, and the echo area warns about it.
 
+Syntax highlighting colors are `syntax.<capture>` keys, named after
+tree-sitter's highlight captures: `syntax.keyword`, `syntax.string`,
+`syntax.comment`, `syntax.function`, `syntax.function.macro`, `syntax.type`…
+They are optional. A capture without its own color uses the one for a shorter
+name (`function.method` falls back to `function`), and text with no color at all
+uses `foreground`:
+
+```json
+{ "themes": { "emax-dark": { "syntax.keyword": "#ff79c6", "syntax.comment": "#6272a4" } } }
+```
+
 ## Project layout
 
 ```
 config/
   default.json       built-in settings, key bindings and modes
+packaging/           Homebrew formula and Debian build helpers used by the release workflow
+.github/workflows/   CI (fmt, clippy, audit, tests) and release (brew + deb) pipelines
 src/
   main.rs            app entry point: opens the file or *scratch* buffer and the window
   ui.rs              GPUI view: rendering and platform-key to Emacs-key translation
@@ -238,6 +278,10 @@ src/
     commands.rs      interactive commands, named after their GNU Emacs counterparts
     keymap.rs        key parsing, keymaps, prefix keys and arguments, dispatcher
     search.rs        swiper-style line search (C-s)
+    dired.rs         directory listings (C-x d): marks, file operations
+    files.rs         find-file's path picker (also dired's target prompts)
+    settings.rs      the settings editor (s-,): setting schema, search, writes to the user file
+    syntax.rs        tree-sitter parsing and highlighting; the list of languages
     picker.rs        fuzzy "completing read" picker (buffer switching, M-x)
     text.rs          pure motion primitives: words, sentences, paragraphs, sexps
     tests.rs         behavioural tests driven by real key sequences

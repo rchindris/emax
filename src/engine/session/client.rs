@@ -102,7 +102,9 @@ impl DaemonBackend {
         let reader = stream.try_clone()?;
         {
             let (notifier, connected) = (notifier.clone(), connected.clone());
-            thread::Builder::new().name("ptyd-client".into()).spawn(move || read_loop(reader, tx, notifier, connected))?;
+            thread::Builder::new()
+                .name("ptyd-client".into())
+                .spawn(move || read_loop(reader, tx, notifier, connected))?;
         }
         Ok(Self {
             stream,
@@ -119,7 +121,12 @@ impl DaemonBackend {
     /// Connect, first starting a daemon (this executable with `--pty-daemon`)
     /// if none is running, waiting up to a few seconds for it to listen. An
     /// idle daemon exits after `idle_exit` (`None`: never).
-    pub fn connect_or_start(socket: &Path, replay_bytes: usize, idle_exit: Option<Duration>, waker: Waker) -> io::Result<Self> {
+    pub fn connect_or_start(
+        socket: &Path,
+        replay_bytes: usize,
+        idle_exit: Option<Duration>,
+        waker: Waker,
+    ) -> io::Result<Self> {
         let exe = std::env::current_exe()?;
         Self::connect_or_start_with(&exe, socket, replay_bytes, idle_exit, waker)
     }
@@ -383,7 +390,10 @@ mod tests {
 
     /// Read the client's greeting and answer it.
     fn greet(s: &mut UnixStream) {
-        assert!(matches!(read_frame::<ClientMsg>(s).unwrap(), Some(ClientMsg::Hello { version: PROTOCOL_VERSION, .. })));
+        assert!(matches!(
+            read_frame::<ClientMsg>(s).unwrap(),
+            Some(ClientMsg::Hello { version: PROTOCOL_VERSION, .. })
+        ));
         write_frame(s, &DaemonMsg::Hello { version: PROTOCOL_VERSION, daemon_pid: 4242 }).unwrap();
     }
 
@@ -418,7 +428,10 @@ mod tests {
         let (dir, socket, t) = fake(|mut s| {
             let _ = read_frame::<ClientMsg>(&mut s);
         });
-        assert_eq!(DaemonBackend::connect(&socket, noop_waker()).err().unwrap().kind(), io::ErrorKind::ConnectionAborted);
+        assert_eq!(
+            DaemonBackend::connect(&socket, noop_waker()).err().unwrap().kind(),
+            io::ErrorKind::ConnectionAborted
+        );
         t.join().unwrap();
         std::fs::remove_dir_all(dir).unwrap();
 
@@ -558,16 +571,21 @@ mod tests {
             greet(&mut s);
             let _ = read_frame::<ClientMsg>(&mut s);
         });
-        let c = DaemonBackend::connect_or_start_with(Path::new("/nonexistent/emax"), &socket, 10, None, noop_waker()).unwrap();
+        let c = DaemonBackend::connect_or_start_with(Path::new("/nonexistent/emax"), &socket, 10, None, noop_waker())
+            .unwrap();
         drop(c);
         t.join().unwrap();
 
         // Nobody is listening and the program can't be run.
         let missing = dir.join("none.sock");
-        let e = DaemonBackend::connect_or_start_with(Path::new("/nonexistent/emax"), &missing, 10, None, noop_waker()).err().unwrap();
+        let e = DaemonBackend::connect_or_start_with(Path::new("/nonexistent/emax"), &missing, 10, None, noop_waker())
+            .err()
+            .unwrap();
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
         // It runs but fails.
-        let e = DaemonBackend::connect_or_start_with(Path::new("/usr/bin/false"), &missing, 10, None, noop_waker()).err().unwrap();
+        let e = DaemonBackend::connect_or_start_with(Path::new("/usr/bin/false"), &missing, 10, None, noop_waker())
+            .err()
+            .unwrap();
         assert!(e.to_string().contains("could not start the session daemon"), "{e}");
         std::fs::remove_dir_all(dir).unwrap();
     }

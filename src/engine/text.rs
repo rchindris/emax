@@ -9,7 +9,28 @@ pub fn is_word(c: char) -> bool {
 
 /// Constituents of a symbol for sexp motion (identifiers, lisp-style names).
 pub fn is_symbol(c: char) -> bool {
-    c.is_alphanumeric() || matches!(c, '_' | '-' | '$' | '!' | '?' | '*' | '+' | '<' | '>' | '=' | '/' | ':' | '&' | '%' | '~' | '^' | '@' | '#' | '.')
+    c.is_alphanumeric()
+        || matches!(
+            c,
+            '_' | '-'
+                | '$'
+                | '!'
+                | '?'
+                | '*'
+                | '+'
+                | '<'
+                | '>'
+                | '='
+                | '/'
+                | ':'
+                | '&'
+                | '%'
+                | '~'
+                | '^'
+                | '@'
+                | '#'
+                | '.'
+        )
 }
 
 pub fn is_open(c: char) -> bool {
@@ -204,12 +225,11 @@ pub fn forward_sentence(r: &Rope, p: usize) -> usize {
     let para_end = forward_paragraph(r, p);
     let mut i = skip_ws(r, p, para_end);
     while i < para_end {
-        if matches!(r.char(i), '.' | '?' | '!') {
-            if let Some(e) = sentence_end_after(r, i) {
-                if e > p {
-                    return e;
-                }
-            }
+        if matches!(r.char(i), '.' | '?' | '!')
+            && let Some(e) = sentence_end_after(r, i)
+            && e > p
+        {
+            return e;
         }
         i += 1;
     }

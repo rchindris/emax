@@ -41,17 +41,19 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::buffers::PICKER_ACTIONS;
-use super::commands::{self, flags, Command};
+use super::commands::{self, Command, flags};
 use super::keymap::{Key, Keymap, PREFIX_ARG_COMMANDS};
 use super::modes::{self, FUNDAMENTAL, LocalSettings, MajorMode, MinorMode, MinorModeDef, Modes, intern};
 use super::search::SEARCH_ACTIONS;
+use super::settings::SETTINGS_ACTIONS;
+use super::syntax;
 use super::theme::{self, DEFAULT_THEME, Fonts, RawThemes, Theme, Themes};
 
 /// The built-in configuration.
 pub const DEFAULT_JSON: &str = include_str!("../../config/default.json");
 
 /// The keymaps a configuration can define.
-pub const KEYMAP_NAMES: [&str; 4] = ["global", "picker", "search", "terminal"];
+pub const KEYMAP_NAMES: [&str; 5] = ["global", "picker", "search", "settings", "terminal"];
 
 #[derive(Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
@@ -117,6 +119,8 @@ struct RawMajor {
     parent: Option<String>,
     files: Option<Vec<String>>,
     interpreters: Option<Vec<String>>,
+    /// The language to highlight with; `""` turns off an inherited one.
+    syntax: Option<String>,
     editor: RawEditor,
     minor_modes: Option<Vec<String>>,
     keymap: RawKeymap,
@@ -136,6 +140,7 @@ struct MajorAcc {
     parent: Option<String>,
     files: Vec<String>,
     interpreters: Vec<String>,
+    syntax: Option<String>,
     settings: LocalSettings,
     minor_modes: Vec<String>,
     keymap: BTreeMap<String, String>,
@@ -272,6 +277,8 @@ pub struct Keymaps {
     pub picker: Keymap,
     /// Keys while the search panel (C-s) is open; single keys only.
     pub search: Keymap,
+    /// Keys while the settings editor (s-,) is open; single keys only.
+    pub settings: Keymap,
 }
 
 impl Keymaps {
@@ -309,7 +316,12 @@ impl Config {
 
     /// The built-in configuration plus the user's file, if there is one.
     pub fn load() -> Self {
-        let Some(path) = user_config_path() else { return Self::builtin() };
+        Self::load_from(user_config_path())
+    }
+
+    /// The built-in configuration plus the file at `path`, if it exists.
+    pub fn load_from(path: Option<PathBuf>) -> Self {
+        let Some(path) = path else { return Self::builtin() };
         match std::fs::read_to_string(&path) {
             Ok(text) => {
                 let label = path.display().to_string();
@@ -365,7 +377,9 @@ impl Config {
                 }
             }
             match font.size {
-                Some(v) if !(4.0..=200.0).contains(&v) => warnings.push(format!("{label}: font.size must be between 4 and 200")),
+                Some(v) if !(4.0..=200.0).contains(&v) => {
+                    warnings.push(format!("{label}: font.size must be between 4 and 200"))
+                }
                 Some(v) => size = v,
                 None => {}
             }
@@ -384,7 +398,10 @@ impl Config {
             }
             for (name, entries) in raw.keymaps {
                 let Some(map) = KEYMAP_NAMES.iter().find(|n| **n == name).and_then(|n| maps.get_mut(n)) else {
-                    warnings.push(format!("{label}: unknown keymap \"{name}\" (expected one of {})", KEYMAP_NAMES.join(", ")));
+                    warnings.push(format!(
+                        "{label}: unknown keymap \"{name}\" (expected one of {})",
+                        KEYMAP_NAMES.join(", ")
+                    ));
                     continue;
                 };
                 merge_keymap(map, entries, &format!("{label}: keymaps.{name}"), &mut warnings);
@@ -400,8 +417,27 @@ impl Config {
         }
 
         let keymaps = Keymaps {
-            picker: build_keymap("keymaps.picker", &maps["picker"], &|a| PICKER_ACTIONS.iter().find(|x| **x == a).copied(), true, &mut warnings),
-            search: build_keymap("keymaps.search", &maps["search"], &|a| SEARCH_ACTIONS.iter().find(|x| **x == a).copied(), true, &mut warnings),
+            picker: build_keymap(
+                "keymaps.picker",
+                &maps["picker"],
+                &|a| PICKER_ACTIONS.iter().find(|x| **x == a).copied(),
+                true,
+                &mut warnings,
+            ),
+            search: build_keymap(
+                "keymaps.search",
+                &maps["search"],
+                &|a| SEARCH_ACTIONS.iter().find(|x| **x == a).copied(),
+                true,
+                &mut warnings,
+            ),
+            settings: build_keymap(
+                "keymaps.settings",
+                &maps["settings"],
+                &|a| SETTINGS_ACTIONS.iter().find(|x| **x == a).copied(),
+                true,
+                &mut warnings,
+            ),
         };
         let modes = build_modes(modes_acc, settings, &maps["global"], &mut warnings);
         terminal.keymap = build_keymap("keymaps.terminal", &maps["terminal"], &resolve_global, false, &mut warnings);
@@ -487,9 +523,7 @@ fn builtin_default_theme() -> Theme {
 }
 
 fn resolve_global(name: &str) -> Option<&'static str> {
-    commands::lookup(name)
-        .map(|c| c.name)
-        .or_else(|| PREFIX_ARG_COMMANDS.iter().find(|c| **c == name).copied())
+    commands::lookup(name).map(|c| c.name).or_else(|| PREFIX_ARG_COMMANDS.iter().find(|c| **c == name).copied())
 }
 
 /// Add a layer's entries to a keymap being merged (`null` unbinds).
@@ -561,6 +595,9 @@ fn merge_modes(acc: &mut ModesAcc, raw: RawModes, label: &str, warnings: &mut Ve
         if let Some(i) = m.interpreters {
             a.interpreters = i;
         }
+        if m.syntax.is_some() {
+            a.syntax = m.syntax;
+        }
         if m.editor.fill_column.is_some() {
             a.settings.fill_column = m.editor.fill_column;
         }
@@ -588,7 +625,12 @@ fn merge_modes(acc: &mut ModesAcc, raw: RawModes, label: &str, warnings: &mut Ve
 
 /// Check the merged modes and build them, together with the global keymap
 /// (which can bind major mode commands).
-fn build_modes(mut acc: ModesAcc, settings: Settings, global: &BTreeMap<String, String>, warnings: &mut Vec<String>) -> Modes {
+fn build_modes(
+    mut acc: ModesAcc,
+    settings: Settings,
+    global: &BTreeMap<String, String>,
+    warnings: &mut Vec<String>,
+) -> Modes {
     acc.major.entry(FUNDAMENTAL.to_string()).or_default();
     acc.major.retain(|name, _| {
         let problem = if !name.ends_with("-mode") {
@@ -644,9 +686,30 @@ fn build_modes(mut acc: ModesAcc, settings: Settings, global: &BTreeMap<String, 
             doc: intern(&format!("Major mode: switch this buffer to {lighter} mode.")),
         };
         let keymap = build_keymap(&format!("{ctx}.keymap"), &a.keymap, &resolve, false, warnings);
+        let syntax = a.syntax.filter(|l| {
+            let known = l.is_empty() || syntax::language(l).is_some();
+            if !known {
+                warnings.push(format!(
+                    "{ctx}.syntax: unknown language \"{l}\" (known: {})",
+                    syntax::language_names().join(", ")
+                ));
+            }
+            known
+        });
         major.insert(
             name,
-            MajorMode { name, lighter, parent, files: a.files, interpreters: a.interpreters, settings: a.settings, keymap, minor_modes, command },
+            MajorMode {
+                name,
+                lighter,
+                parent,
+                files: a.files,
+                interpreters: a.interpreters,
+                syntax,
+                settings: a.settings,
+                keymap,
+                minor_modes,
+                command,
+            },
         );
     }
     // Break parent cycles at the link that closes them.
@@ -770,7 +833,11 @@ mod tests {
         assert_eq!(c.session, SessionConfig { restore_session: false, state_dir: Some("/tmp/state".into()) });
 
         // `null` goes back to the default.
-        let reset = Config::from_layers(&[("built-in", DEFAULT_JSON), ("a", user), ("b", r#"{"terminal": {"shell": null, "socket": null}}"#)]);
+        let reset = Config::from_layers(&[
+            ("built-in", DEFAULT_JSON),
+            ("a", user),
+            ("b", r#"{"terminal": {"shell": null, "socket": null}}"#),
+        ]);
         assert_eq!(reset.terminal.shell, None);
         assert_eq!(reset.terminal.socket, None);
 
@@ -790,14 +857,17 @@ mod tests {
     fn daemon_idle_exit() {
         use std::time::Duration;
         assert_eq!(Config::builtin().terminal.daemon_idle_exit, Some(Duration::from_secs(60)));
-        let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", r#"{"terminal": {"daemon_idle_exit": 5}}"#)]);
+        let c =
+            Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", r#"{"terminal": {"daemon_idle_exit": 5}}"#)]);
         assert!(c.warnings.is_empty(), "{:#?}", c.warnings);
         assert_eq!(c.terminal.daemon_idle_exit, Some(Duration::from_secs(5)));
         // 0: never exit.
-        let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", r#"{"terminal": {"daemon_idle_exit": 0}}"#)]);
+        let c =
+            Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", r#"{"terminal": {"daemon_idle_exit": 0}}"#)]);
         assert_eq!(c.terminal.daemon_idle_exit, None);
         // Not a number of seconds: the layer is reported.
-        let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", r#"{"terminal": {"daemon_idle_exit": -3}}"#)]);
+        let c =
+            Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", r#"{"terminal": {"daemon_idle_exit": -3}}"#)]);
         assert!(!c.warnings.is_empty());
         assert_eq!(c.terminal.daemon_idle_exit, Some(Duration::from_secs(60)));
     }
@@ -810,6 +880,9 @@ mod tests {
         }
         for a in SEARCH_ACTIONS {
             assert!(!c.keymaps.search.keys_for(a).is_empty(), "search action {a} is unbound");
+        }
+        for a in SETTINGS_ACTIONS {
+            assert!(!c.keymaps.settings.keys_for(a).is_empty(), "settings action {a} is unbound");
         }
     }
 
@@ -917,7 +990,10 @@ mod tests {
         assert_eq!(t.background, 0x112233ff);
         assert_eq!(t.foreground, builtin_default_theme().foreground);
 
-        let cyclic = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", r#"{"theme": "a", "themes": {"a": {"inherits": "b"}, "b": {"inherits": "a"}}}"#)]);
+        let cyclic = Config::from_layers(&[
+            ("built-in", DEFAULT_JSON),
+            ("user", r#"{"theme": "a", "themes": {"a": {"inherits": "b"}, "b": {"inherits": "a"}}}"#),
+        ]);
         assert!(cyclic.warnings.iter().any(|w| w.contains("cycle")), "{:#?}", cyclic.warnings);
         let unknown = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", r#"{"theme": "nope"}"#)]);
         assert!(unknown.warnings.iter().any(|w| w.contains("unknown theme \"nope\"")), "{:#?}", unknown.warnings);

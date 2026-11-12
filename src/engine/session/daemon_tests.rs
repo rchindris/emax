@@ -81,10 +81,10 @@ impl TestDaemon {
 
 impl Drop for TestDaemon {
     fn drop(&mut self) {
-        if !self.finished() {
-            if let Ok(mut c) = DaemonBackend::connect(&self.socket, noop_waker()) {
-                let _ = c.shutdown();
-            }
+        if !self.finished()
+            && let Ok(mut c) = DaemonBackend::connect(&self.socket, noop_waker())
+        {
+            let _ = c.shutdown();
         }
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -127,7 +127,9 @@ fn exits(events: &[PtyEvent], id: SessionId) -> Vec<ExitStatus> {
 
 /// Receive until session `id`'s output is exactly `want`.
 fn expect_output(b: &mut impl PtyBackend, events: &mut Vec<PtyEvent>, id: SessionId, want: &[u8]) {
-    recv_until(b, events, &format!("output {:?}", String::from_utf8_lossy(want)), |ev| output(ev, id).len() >= want.len());
+    recv_until(b, events, &format!("output {:?}", String::from_utf8_lossy(want)), |ev| {
+        output(ev, id).len() >= want.len()
+    });
     assert_eq!(output(events, id), want);
 }
 
@@ -353,7 +355,10 @@ fn attach_sends_replay_exit_then_reply() {
     write_frame(&mut raw, &ClientMsg::Request { req: 7, op: Op::Attach { id, size: PtySize::default() } }).unwrap();
     let mut r = BufReader::new(raw);
     assert_eq!(read_frame::<DaemonMsg>(&mut r).unwrap(), Some(DaemonMsg::Output { id, data: b"bye".to_vec() }));
-    assert_eq!(read_frame::<DaemonMsg>(&mut r).unwrap(), Some(DaemonMsg::Exited { id, status: ExitStatus { code: 3, signal: None } }));
+    assert_eq!(
+        read_frame::<DaemonMsg>(&mut r).unwrap(),
+        Some(DaemonMsg::Exited { id, status: ExitStatus { code: 3, signal: None } })
+    );
     assert_eq!(read_frame::<DaemonMsg>(&mut r).unwrap(), Some(DaemonMsg::Reply { req: 7, result: Ok(Reply::Ok) }));
 }
 
@@ -455,7 +460,10 @@ fn the_handshake_comes_first_and_versions_must_match() {
     let mut s = UnixStream::connect(&d.socket).unwrap();
     s.set_read_timeout(Some(TIMEOUT)).unwrap();
     write_frame(&mut s, &ClientMsg::Hello { version: PROTOCOL_VERSION + 1, client_pid: 1 }).unwrap();
-    assert!(matches!(read_frame::<DaemonMsg>(&mut s).unwrap(), Some(DaemonMsg::Hello { version: PROTOCOL_VERSION, .. })));
+    assert!(matches!(
+        read_frame::<DaemonMsg>(&mut s).unwrap(),
+        Some(DaemonMsg::Hello { version: PROTOCOL_VERSION, .. })
+    ));
     assert!(matches!(read_frame::<DaemonMsg>(&mut s), Ok(None) | Err(_)));
 
     // A request before the greeting: hung up on, no reply.
@@ -590,7 +598,10 @@ fn a_stalled_client_holds_output_back_without_losing_any() {
     let mut stalled = d.raw();
     write_frame(&mut stalled, &ClientMsg::Request { req: 1, op: Op::Attach { id, size: PtySize::default() } }).unwrap();
     // Attached once the reply is in; from then on it reads nothing.
-    assert_eq!(read_frame::<DaemonMsg>(&mut stalled).unwrap(), Some(DaemonMsg::Reply { req: 1, result: Ok(Reply::Ok) }));
+    assert_eq!(
+        read_frame::<DaemonMsg>(&mut stalled).unwrap(),
+        Some(DaemonMsg::Reply { req: 1, result: Ok(Reply::Ok) })
+    );
 
     // Produce well over the high-water mark, reading it all from `a`.
     let chunk: Vec<u8> = (0..64 << 10).map(|i| (i % 256) as u8).collect();

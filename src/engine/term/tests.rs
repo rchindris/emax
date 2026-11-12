@@ -571,7 +571,10 @@ fn resize_with_wide_chars_does_not_split_them() {
         for line in &s.lines {
             for (i, c) in line.iter().enumerate() {
                 if c.flags.wide {
-                    assert!(i + 1 < line.len() && line[i + 1].flags.wide_spacer, "{cols} cols: wide char without spacer");
+                    assert!(
+                        i + 1 < line.len() && line[i + 1].flags.wide_spacer,
+                        "{cols} cols: wide char without spacer"
+                    );
                 }
             }
         }
@@ -850,11 +853,52 @@ impl Rng {
 
 /// Pieces that make random input reach deep into the parser.
 const FRAGMENTS: &[&[u8]] = &[
-    b"\x1b[", b"\x1b]", b"\x1bP", b"\x1b[?", b"\x07", b"\x1b\\", b";", b"1049h", b"1049l", b"2004h", b"m", b"H",
-    b"J", b"K", b"r", b"38;5;", b"48;2;", b"\x1b[6n", b"\x1b[c", b"\x1b]4;1;?\x07", b"\x1b]11;?\x07", "日本".as_bytes(),
-    "😀".as_bytes(), "e\u{301}".as_bytes(), b"\r\n", b"\x1bc", b"\x1b[3J", b"\x1b[?1h", b"\x1b7", b"\x1b8", b"\x1b[999;999H",
-    b"\x1b[4294967295A", b"\x1b[2;1r", b"\x1b[L", b"\x1b[M", b"\x1b[@", b"\x1b[P", b"\x1b[X", b"\x1b[b", b"\t",
-    b"\x1b[22t", b"\x1b[23t", b"\x1b[?2026h", b"\x1b[?2026l", b"\x1b]8;;http://x\x07", b"\x1b]52;c;aGk=\x07",
+    b"\x1b[",
+    b"\x1b]",
+    b"\x1bP",
+    b"\x1b[?",
+    b"\x07",
+    b"\x1b\\",
+    b";",
+    b"1049h",
+    b"1049l",
+    b"2004h",
+    b"m",
+    b"H",
+    b"J",
+    b"K",
+    b"r",
+    b"38;5;",
+    b"48;2;",
+    b"\x1b[6n",
+    b"\x1b[c",
+    b"\x1b]4;1;?\x07",
+    b"\x1b]11;?\x07",
+    "日本".as_bytes(),
+    "😀".as_bytes(),
+    "e\u{301}".as_bytes(),
+    b"\r\n",
+    b"\x1bc",
+    b"\x1b[3J",
+    b"\x1b[?1h",
+    b"\x1b7",
+    b"\x1b8",
+    b"\x1b[999;999H",
+    b"\x1b[4294967295A",
+    b"\x1b[2;1r",
+    b"\x1b[L",
+    b"\x1b[M",
+    b"\x1b[@",
+    b"\x1b[P",
+    b"\x1b[X",
+    b"\x1b[b",
+    b"\t",
+    b"\x1b[22t",
+    b"\x1b[23t",
+    b"\x1b[?2026h",
+    b"\x1b[?2026l",
+    b"\x1b]8;;http://x\x07",
+    b"\x1b]52;c;aGk=\x07",
 ];
 
 #[test]
@@ -963,7 +1007,10 @@ fn row_runs_split_on_style_and_wide_chars() {
     let t = fed(12, 1, "ab\x1b[31mcd\x1b[1me\x1b[0m日f😀");
     let runs = snap(&t).row_runs(0);
     let summary: Vec<(usize, usize, &str)> = runs.iter().map(|r| (r.col, r.width, r.text.as_str())).collect();
-    assert_eq!(summary, [(0, 2, "ab"), (2, 2, "cd"), (4, 1, "e"), (5, 2, "日"), (7, 1, "f"), (8, 2, "😀"), (10, 2, "  ")]);
+    assert_eq!(
+        summary,
+        [(0, 2, "ab"), (2, 2, "cd"), (4, 1, "e"), (5, 2, "日"), (7, 1, "f"), (8, 2, "😀"), (10, 2, "  ")]
+    );
     assert_eq!(runs[1].fg, p.ansi[1]);
     assert!(runs[2].flags.bold);
     assert_eq!(runs[2].fg, p.ansi[9]);

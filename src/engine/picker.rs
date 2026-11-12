@@ -1,6 +1,6 @@
 //! A generic "completing read" picker: a query, a list of candidates, fuzzy
 //! filtering with match positions (for highlighting) and a selection.
-//! Used by switch-to-buffer and M-x.
+//! Used by switch-to-buffer, M-x and find-file.
 
 use super::editor::Args;
 
@@ -12,6 +12,52 @@ pub enum PickerKind {
     Buffers,
     /// A command to run with `args` (`Candidate::id` indexes `names`).
     Commands { names: Vec<&'static str>, args: Args },
+    /// A file: the query is a path, the candidates are the entries of the
+    /// directory part `dir` (as typed), filtered by the last path component.
+    Files { dir: String, purpose: FilePurpose },
+}
+
+/// What a file picker's chosen path is for.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum FilePurpose {
+    /// Visit the file (find-file).
+    #[default]
+    Visit,
+    /// Save the current buffer to it (save-buffer in a buffer with no file).
+    /// `overwrite` is an existing file that a second RET will overwrite.
+    Save { overwrite: Option<std::path::PathBuf> },
+    /// List a directory (dired, C-x d). RET with nothing typed after the
+    /// last `/` lists the directory typed.
+    Dired,
+    /// Rename or copy `sources` (dired's R and C): the path is taken as
+    /// typed. `overwrite` is an existing file that a second RET will replace.
+    Transfer { op: Transfer, sources: Vec<std::path::PathBuf>, overwrite: Option<std::path::PathBuf> },
+    /// Create a directory (dired's +), taken as typed.
+    Mkdir,
+}
+
+/// What dired does with files it is given a target for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transfer {
+    Rename,
+    Copy,
+}
+
+impl Transfer {
+    pub fn title(self) -> &'static str {
+        match self {
+            Transfer::Rename => "Rename",
+            Transfer::Copy => "Copy",
+        }
+    }
+}
+
+impl FilePurpose {
+    /// Whether RET takes the path as typed rather than the selected
+    /// candidate (the picker then only shows what is there).
+    pub fn literal(&self) -> bool {
+        matches!(self, FilePurpose::Transfer { .. } | FilePurpose::Mkdir)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -64,6 +110,41 @@ impl Picker {
         p
     }
 
+    /// Whether this picker chooses a file to save the current buffer to.
+    pub fn saving(&self) -> bool {
+        matches!(self.kind, PickerKind::Files { purpose: FilePurpose::Save { .. }, .. })
+    }
+
+    /// What a file picker's path is for.
+    pub fn purpose(&self) -> Option<&FilePurpose> {
+        match &self.kind {
+            PickerKind::Files { purpose, .. } => Some(purpose),
+            _ => None,
+        }
+    }
+
+    /// What RET does in a file picker, for the footer ("" for nothing).
+    pub fn file_accept_hint(&self) -> &'static str {
+        let Some(purpose) = self.purpose() else { return "" };
+        let typed = !self.filter().is_empty();
+        let saving = self.saving();
+        match purpose {
+            FilePurpose::Transfer { op: Transfer::Rename, .. } => "move",
+            FilePurpose::Transfer { op: Transfer::Copy, .. } => "copy",
+            FilePurpose::Mkdir if typed => "create",
+            FilePurpose::Mkdir => "",
+            FilePurpose::Dired if !typed => "list",
+            _ => match self.selected_candidate() {
+                Some(c) if c.label.ends_with('/') => "enter",
+                Some(_) if saving => "overwrite",
+                Some(_) => "open",
+                None if typed && saving => "save",
+                None if typed && *purpose == FilePurpose::Visit => "create",
+                None => "",
+            },
+        }
+    }
+
     pub fn with_kind(mut self, kind: PickerKind) -> Self {
         self.kind = kind;
         self
@@ -76,14 +157,24 @@ impl Picker {
         self.selected = keep.min(self.matches.len().saturating_sub(1));
     }
 
+    /// The part of the query candidates are filtered by: all of it, or for
+    /// files the text after the last `/`.
+    pub fn filter(&self) -> &str {
+        match self.kind {
+            PickerKind::Files { .. } => self.query.rsplit_once('/').map_or(self.query.as_str(), |(_, f)| f),
+            _ => &self.query,
+        }
+    }
+
     pub fn refilter(&mut self) {
+        let filter = self.filter();
         let mut matches: Vec<Match> = self
             .candidates
             .iter()
             .enumerate()
-            .filter_map(|(i, c)| fuzzy(&self.query, &c.label).map(|(score, positions)| Match { index: i, score, positions }))
+            .filter_map(|(i, c)| fuzzy(filter, &c.label).map(|(score, positions)| Match { index: i, score, positions }))
             .collect();
-        if !self.query.trim().is_empty() {
+        if !filter.trim().is_empty() {
             // Best score first; ties keep the original (most-recently-used) order.
             matches.sort_by(|a, b| b.score.cmp(&a.score).then(a.index.cmp(&b.index)));
         }
@@ -292,7 +383,14 @@ mod tests {
 
     #[test]
     fn picker_filtering_and_movement() {
-        let c = |id, l: &str| Candidate { id, label: l.into(), detail: String::new(), annotation: String::new(), modified: false, current: false };
+        let c = |id, l: &str| Candidate {
+            id,
+            label: l.into(),
+            detail: String::new(),
+            annotation: String::new(),
+            modified: false,
+            current: false,
+        };
         let mut p = Picker::new("Buffer", vec![c(1, "main.rs"), c(2, "editor.rs"), c(3, "*scratch*")]);
         assert_eq!(p.matches.len(), 3);
         p.push_str("rs");

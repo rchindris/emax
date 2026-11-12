@@ -6,6 +6,11 @@
 //! follows the system appearance. A theme may `inherit` another one and set
 //! only the colors it changes.
 //!
+//! Syntax highlighting colors are keys `syntax.<capture>`, named after
+//! tree-sitter captures (`syntax.keyword`, `syntax.function.method`…). They
+//! are optional: a capture with no color of its own takes the color of a
+//! shorter name (`function`), and text with none keeps `foreground`.
+//!
 //! This module has no GUI dependencies: colors are plain `0xRRGGBBAA` values.
 
 use std::collections::BTreeMap;
@@ -20,12 +25,18 @@ pub const DEFAULT_THEME: &str = "emax-dark";
 /// The key in a theme that names the theme it builds on.
 const INHERITS: &str = "inherits";
 
+/// Theme keys starting with this set syntax highlighting colors.
+const SYNTAX_PREFIX: &str = "syntax.";
+
 macro_rules! theme_colors {
     ($( $(#[doc = $doc:literal])* $field:ident, )*) => {
         /// Every color the UI draws with.
         #[derive(Clone, Debug, PartialEq)]
         pub struct Theme {
             $( $(#[doc = $doc])* pub $field: Rgba, )*
+            /// Syntax highlighting colors by capture name (`keyword`,
+            /// `function.method`…), set as `syntax.<name>` (see `syntax_color`).
+            pub syntax: BTreeMap<String, Rgba>,
         }
 
         impl Theme {
@@ -38,7 +49,14 @@ macro_rules! theme_colors {
                     let v = entries.get(name).ok_or_else(|| format!("no color for {name}"))?;
                     parse_color(v).ok_or_else(|| format!("{name}: \"{v}\" is not a color"))
                 };
-                Ok(Self { $( $field: color(stringify!($field))?, )* })
+                let mut syntax = BTreeMap::new();
+                for (key, v) in entries {
+                    if let Some(name) = key.strip_prefix(SYNTAX_PREFIX) {
+                        let c = parse_color(v).ok_or_else(|| format!("{key}: \"{v}\" is not a color"))?;
+                        syntax.insert(name.to_string(), c);
+                    }
+                }
+                Ok(Self { $( $field: color(stringify!($field))?, )* syntax })
             }
 
             fn slot(&mut self, name: &str) -> Option<&mut Rgba> {
@@ -126,6 +144,20 @@ theme_colors! {
     term_bright_white,
 }
 
+impl Theme {
+    /// The color for a syntax capture: the most specific one the theme
+    /// sets, dropping trailing parts (`function.method` -> `function`).
+    pub fn syntax_color(&self, capture: &str) -> Option<Rgba> {
+        let mut name = capture;
+        loop {
+            if let Some(c) = self.syntax.get(name) {
+                return Some(*c);
+            }
+            name = &name[..name.rfind('.')?];
+        }
+    }
+}
+
 /// Parse `#rgb`, `#rrggbb` or `#rrggbbaa` (the `#` is optional).
 pub fn parse_color(s: &str) -> Option<Rgba> {
     let hex = s.strip_prefix('#').unwrap_or(s);
@@ -190,6 +222,17 @@ fn resolve_inner(
         if key == INHERITS {
             continue;
         }
+        if let Some(capture) = key.strip_prefix(SYNTAX_PREFIX).filter(|c| !c.is_empty()) {
+            match parse_color(value) {
+                Some(c) => {
+                    theme.syntax.insert(capture.to_string(), c);
+                }
+                None => {
+                    warnings.push(format!("themes.{name}.{key}: \"{value}\" is not a color (use #rrggbb or #rrggbbaa)"))
+                }
+            }
+            continue;
+        }
         let Some(slot) = theme.slot(key) else {
             warnings.push(format!("themes.{name}: unknown color \"{key}\""));
             continue;
@@ -199,7 +242,9 @@ fn resolve_inner(
                 *slot = c;
                 missing.retain(|m| m != key);
             }
-            None => warnings.push(format!("themes.{name}.{key}: \"{value}\" is not a color (use #rrggbb or #rrggbbaa)")),
+            None => {
+                warnings.push(format!("themes.{name}.{key}: \"{value}\" is not a color (use #rrggbb or #rrggbbaa)"))
+            }
         }
     }
     if parent.is_none() && !missing.is_empty() {

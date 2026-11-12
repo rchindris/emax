@@ -98,7 +98,8 @@ pub fn wait_fd(fd: RawFd, write: bool, cancel: RawFd) -> io::Result<Ready> {
                 libc::FD_SET(fd, &mut rd);
             }
         }
-        let n = unsafe { libc::select(fd.max(cancel) + 1, &mut rd, &mut wr, std::ptr::null_mut(), std::ptr::null_mut()) };
+        let n =
+            unsafe { libc::select(fd.max(cancel) + 1, &mut rd, &mut wr, std::ptr::null_mut(), std::ptr::null_mut()) };
         if n < 0 {
             let err = io::Error::last_os_error();
             if err.kind() == io::ErrorKind::Interrupted {

@@ -12,18 +12,20 @@ use ropey::Rope;
 
 use super::buffer::{Buffer, BufferId};
 use super::buffers::BufferSlot;
+use super::commands::{self, Command, flags};
 use super::config::{PtyBackendKind, SessionConfig, TerminalConfig};
-use super::hooks::{Event, Hooks};
-use super::pty::{PtyBackend, Waker, local::LocalBackend, noop_waker};
-use super::session::client::DaemonBackend;
-use super::term::buffer::TermState;
-use super::window::Layout;
-use super::picker::Picker;
-use super::search::Swiper;
-use super::commands::{self, flags, Command};
 use super::cursor::Cursor;
+use super::dired::DiredState;
+use super::hooks::{Event, Hooks};
 use super::modes::{MinorMode, Modes};
+use super::picker::Picker;
+use super::pty::{PtyBackend, Waker, local::LocalBackend, noop_waker};
+use super::search::Swiper;
+use super::session::client::DaemonBackend;
+use super::settings::SettingsEditor;
+use super::term::buffer::TermState;
 use super::text;
+use super::window::Layout;
 
 /// The raw prefix argument, as typed.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -88,6 +90,8 @@ pub struct Editor {
     pub picker: Option<Picker>,
     /// An open swiper search (C-s). Takes the keyboard while open.
     pub swiper: Option<Swiper>,
+    /// The open settings editor (s-,). Takes the keyboard while open.
+    pub settings: Option<SettingsEditor>,
     /// The last accepted search query (C-s C-s repeats it).
     pub last_search: String,
 
@@ -125,6 +129,8 @@ pub struct Editor {
     pub layout: Layout,
     /// The terminal side of each terminal buffer, by buffer id.
     pub terminals: HashMap<BufferId, TermState>,
+    /// What each directory listing (dired buffer) shows, by buffer id.
+    pub direds: HashMap<BufferId, DiredState>,
     /// Runs terminal processes; created on first use (see `pty_backend`).
     pub(crate) pty: Option<Box<dyn PtyBackend>>,
     /// Given to the PTY backend: wakes the UI when output arrives. It calls
@@ -160,6 +166,7 @@ impl Editor {
             next_buf_id: 2,
             picker: None,
             swiper: None,
+            settings: None,
             last_search: String::new(),
             kill_ring: Vec::new(),
             kill_multi: None,
@@ -183,6 +190,7 @@ impl Editor {
             hooks,
             layout: Layout::new(1),
             terminals: HashMap::new(),
+            direds: HashMap::new(),
             pty: None,
             waker,
             waker_target,
@@ -220,10 +228,16 @@ impl Editor {
                 PtyBackendKind::Local => Box::new(LocalBackend::new(waker)),
                 PtyBackendKind::Daemon => {
                     let socket = super::session::socket_path(cfg.socket.as_deref());
-                    match DaemonBackend::connect_or_start(&socket, cfg.replay_bytes, cfg.daemon_idle_exit, waker.clone()) {
+                    match DaemonBackend::connect_or_start(
+                        &socket,
+                        cfg.replay_bytes,
+                        cfg.daemon_idle_exit,
+                        waker.clone(),
+                    ) {
                         Ok(b) => Box::new(b),
                         Err(e) => {
-                            self.message = Some(format!("Session daemon unavailable ({e}); terminals will end with the editor"));
+                            self.message =
+                                Some(format!("Session daemon unavailable ({e}); terminals will end with the editor"));
                             Box::new(LocalBackend::new(waker))
                         }
                     }
@@ -251,6 +265,10 @@ impl Editor {
 
     pub fn len(&self) -> usize {
         self.buf.rope.len_chars()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     pub fn primary_index(&self) -> usize {
@@ -361,16 +379,16 @@ impl Editor {
 
         if appending {
             if texts.len() > 1 {
-                if let Some(m) = &mut self.kill_multi {
-                    if m.len() == texts.len() {
-                        for (old, t) in m.iter_mut().zip(&texts) {
-                            *old = join(old, t);
-                        }
-                        let joined = m.join("\n");
-                        *self.kill_ring.last_mut().unwrap() = joined.clone();
-                        self.clipboard_out = Some(joined);
-                        return;
+                if let Some(m) = &mut self.kill_multi
+                    && m.len() == texts.len()
+                {
+                    for (old, t) in m.iter_mut().zip(&texts) {
+                        *old = join(old, t);
                     }
+                    let joined = m.join("\n");
+                    *self.kill_ring.last_mut().unwrap() = joined.clone();
+                    self.clipboard_out = Some(joined);
+                    return;
                 }
             } else if self.kill_multi.is_none() {
                 let top = self.kill_ring.last_mut().unwrap();
@@ -410,12 +428,11 @@ impl Editor {
             return None;
         }
         let i = index % len;
-        if i == 0 {
-            if let Some(m) = &self.kill_multi {
-                if m.len() == self.cursors.len() {
-                    return Some(m.clone());
-                }
-            }
+        if i == 0
+            && let Some(m) = &self.kill_multi
+            && m.len() == self.cursors.len()
+        {
+            return Some(m.clone());
         }
         Some(vec![self.kill_ring[len - 1 - i].clone(); self.cursors.len()])
     }
@@ -477,7 +494,8 @@ impl Editor {
         }
         // A refused edit is taken back below; the text comes back exactly,
         // but points it moved (deletions collapse them) can't be recomputed.
-        let other_points = (undoable && read_only).then(|| (self.buf_id, self.layout.other_windows_cursors(self.buf_id)));
+        let other_points =
+            (undoable && read_only).then(|| (self.buf_id, self.layout.other_windows_cursors(self.buf_id)));
 
         // Shift-selection (Emacs' shift-select-mode).
         if cmd.flags & flags::MOTION != 0 {

@@ -517,10 +517,11 @@ impl PtyBackend for LocalBackend {
         let waiter = shared.clone();
         let (input, input_rx) = mpsc::channel();
         let (wfd, wshared, exit_tx) = (fd.clone(), shared.clone(), input.clone());
-        let more = self.spawn_thread(format!("pty-wait-{pid}"), move || waiter_loop(waiter, Some(exit_tx))).and_then(|w| {
-            threads.push(w);
-            self.spawn_thread(format!("pty-write-{pid}"), move || writer_loop(wfd, input_rx, wshared))
-        });
+        let more =
+            self.spawn_thread(format!("pty-wait-{pid}"), move || waiter_loop(waiter, Some(exit_tx))).and_then(|w| {
+                threads.push(w);
+                self.spawn_thread(format!("pty-write-{pid}"), move || writer_loop(wfd, input_rx, wshared))
+            });
         match more {
             Ok(w) => threads.push(w),
             Err(e) => {
@@ -534,7 +535,8 @@ impl PtyBackend for LocalBackend {
             }
         }
         let size = spec.size;
-        self.sessions.insert(id, Session { spec, size, master: Some(pair.master), fd: Some(fd), input, shared, threads });
+        self.sessions
+            .insert(id, Session { spec, size, master: Some(pair.master), fd: Some(fd), input, shared, threads });
         Ok(id)
     }
 
@@ -579,7 +581,9 @@ impl PtyBackend for LocalBackend {
         if bytes.is_empty() {
             return Ok(());
         }
-        s.input.send(Input::Bytes(bytes.to_vec())).map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "process input is closed"))
+        s.input
+            .send(Input::Bytes(bytes.to_vec()))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "process input is closed"))
     }
 
     fn resize(&mut self, id: SessionId, size: PtySize) -> io::Result<()> {

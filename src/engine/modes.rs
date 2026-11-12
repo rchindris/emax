@@ -30,6 +30,9 @@ use super::keymap::Keymap;
 /// The major mode every configuration has, used when nothing else applies.
 pub const FUNDAMENTAL: &str = "fundamental-mode";
 
+/// The major mode of directory listings (its keymap is in the configuration).
+pub const DIRED: &str = "dired-mode";
+
 /// How far a parent chain is followed (cycles are removed when loading, this is a backstop).
 const MAX_DEPTH: usize = 32;
 
@@ -47,7 +50,8 @@ pub enum MinorMode {
 
 impl MinorMode {
     /// In mode-line order.
-    pub const ALL: [MinorMode; 4] = [MinorMode::AutoFill, MinorMode::ReadOnly, MinorMode::Overwrite, MinorMode::ElectricPair];
+    pub const ALL: [MinorMode; 4] =
+        [MinorMode::AutoFill, MinorMode::ReadOnly, MinorMode::Overwrite, MinorMode::ElectricPair];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -116,6 +120,9 @@ pub struct MajorMode {
     pub files: Vec<String>,
     /// Programs named on a `#!` line, e.g. `python` (trailing version digits are ignored).
     pub interpreters: Vec<String>,
+    /// The language to highlight with (`Some("")`: none, even if the parent has one;
+    /// `None`: the parent's).
+    pub syntax: Option<String>,
     pub settings: LocalSettings,
     pub keymap: Keymap,
     /// Minor modes turned on when the mode starts (after the parent's).
@@ -170,6 +177,13 @@ impl Modes {
     }
 
     /// `name`, its parent, the parent's parent, ...
+    /// The language major mode `name` highlights with: its own, else the
+    /// nearest ancestor's.
+    pub fn syntax(&self, name: &str) -> Option<&str> {
+        let set = self.chain(name).into_iter().find_map(|m| m.syntax.as_deref())?;
+        (!set.is_empty()).then_some(set)
+    }
+
     pub fn chain(&self, name: &str) -> Vec<&MajorMode> {
         let mut v = Vec::new();
         let mut cur = self.major.get(name);
@@ -238,13 +252,21 @@ impl Modes {
 
     /// The modes a newly created or opened buffer starts with.
     pub fn initial(&self, buf: &Buffer) -> BufferModes {
+        if buf.kind == super::buffer::BufferKind::Dired {
+            let mut modes = self.enter(DIRED);
+            if !modes.has(MinorMode::ReadOnly) {
+                modes.minor.push(MinorMode::ReadOnly);
+            }
+            return modes;
+        }
         let major = self.detect(buf).unwrap_or(if buf.path.is_none() && buf.name == "*scratch*" {
             self.initial_major
         } else {
             self.default_major
         });
         let mut modes = self.enter(major);
-        let read_only_file = buf.path.as_deref().and_then(|p| p.metadata().ok()).is_some_and(|m| m.permissions().readonly());
+        let read_only_file =
+            buf.path.as_deref().and_then(|p| p.metadata().ok()).is_some_and(|m| m.permissions().readonly());
         if read_only_file {
             modes.minor.push(MinorMode::ReadOnly);
         }
@@ -256,9 +278,8 @@ impl Modes {
     /// interpreter on a `#!` line, then the file name.
     pub fn detect(&self, buf: &Buffer) -> Option<&'static str> {
         let first = first_line(&buf.rope, 0);
-        let marker = mode_marker(&first).or_else(|| {
-            first.starts_with("#!").then(|| first_line(&buf.rope, 1)).and_then(|l| mode_marker(&l))
-        });
+        let marker = mode_marker(&first)
+            .or_else(|| first.starts_with("#!").then(|| first_line(&buf.rope, 1)).and_then(|l| mode_marker(&l)));
         if let Some(name) = marker.and_then(|n| self.major.get(n.as_str())) {
             return Some(name.name);
         }
@@ -276,7 +297,12 @@ impl Modes {
         self.major
             .values()
             .filter_map(|m| {
-                let best = m.files.iter().filter(|p| glob(p, &file)).map(|p| p.chars().filter(|c| *c != '*' && *c != '?').count()).max()?;
+                let best = m
+                    .files
+                    .iter()
+                    .filter(|p| glob(p, &file))
+                    .map(|p| p.chars().filter(|c| *c != '*' && *c != '?').count())
+                    .max()?;
                 Some((best, m.name))
             })
             .max_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(a.1)))
@@ -376,6 +402,19 @@ impl Editor {
         }
     }
 
+    /// Use a reloaded configuration's modes while running: buffers keep
+    /// their major and minor modes; only a buffer whose major mode no
+    /// longer exists starts over in the mode the new configuration selects.
+    pub fn reload_modes(&mut self, modes: Arc<Modes>) {
+        self.modes = modes;
+        let m = &self.modes;
+        for buf in std::iter::once(&mut self.buf).chain(self.others.iter_mut().map(|s| &mut s.buf)) {
+            if !m.major.contains_key(buf.modes.major) {
+                buf.modes = m.initial(buf);
+            }
+        }
+    }
+
     /// Switch the current buffer to major mode `name`. Like Emacs, this drops
     /// buffer-local settings and minor modes (except read-only), then turns on
     /// the minor modes the new mode wants.
@@ -412,7 +451,8 @@ impl Editor {
             Some(_) => a.n() > 0,
         };
         self.set_minor_mode(m, on);
-        self.message = Some(format!("{} mode {} in current buffer", m.title(), if on { "enabled" } else { "disabled" }));
+        self.message =
+            Some(format!("{} mode {} in current buffer", m.title(), if on { "enabled" } else { "disabled" }));
     }
 
     pub fn fill_column(&self) -> usize {

@@ -42,10 +42,14 @@ fn t() -> T {
     let events = Rc::new(RefCell::new(Vec::new()));
     for kind in EventKind::ALL.into_iter().filter(|k| !matches!(k, EventKind::AfterCommand | EventKind::Timer)) {
         let log = events.clone();
-        ed.hooks.add(kind, "record", Rc::new(move |_, e| {
-            log.borrow_mut().push(e.clone());
-            Ok(())
-        }));
+        ed.hooks.add(
+            kind,
+            "record",
+            Rc::new(move |_, e| {
+                log.borrow_mut().push(e.clone());
+                Ok(())
+            }),
+        );
     }
     ed.run_hooks();
     events.borrow_mut().clear();
@@ -133,7 +137,10 @@ fn term_spawns_the_shell_in_a_new_current_buffer() {
     assert_eq!(spec.program, "/bin/test-shell");
     assert_eq!(spec.args, ["-l"]);
     assert_eq!(spec.cwd.as_deref(), Some(dir.as_path()));
-    assert_eq!(spec.env, [("TERM".to_string(), "xterm-256color".to_string()), ("COLORTERM".into(), "truecolor".into())]);
+    assert_eq!(
+        spec.env,
+        [("TERM".to_string(), "xterm-256color".to_string()), ("COLORTERM".into(), "truecolor".into())]
+    );
     assert_eq!(spec.size, PtySize::new(80, 24));
     assert_eq!(x.ed.terminal(term).unwrap().term.size(), (80, 24));
     assert_eq!(x.ed.terminal(term).unwrap().spec, spec);
@@ -346,7 +353,16 @@ use crate::engine::editor::RawArg;
 #[test]
 fn commands_outside_terminal_buffers_fail() {
     let mut x = t();
-    for cmd in ["term-char-mode", "term-copy-mode", "term-interrupt-subjob", "term-send-eof", "term-stop-subjob", "term-quit-subjob", "term-scroll-up", "term-scroll-down"] {
+    for cmd in [
+        "term-char-mode",
+        "term-copy-mode",
+        "term-interrupt-subjob",
+        "term-send-eof",
+        "term-stop-subjob",
+        "term-quit-subjob",
+        "term-scroll-up",
+        "term-scroll-down",
+    ] {
         x.ed.execute(cmd, Args::default());
         assert_eq!(x.ed.message.as_deref(), Some(format!("{cmd}: not a terminal buffer").as_str()));
     }
@@ -446,8 +462,7 @@ fn title_and_bell_hooks() {
 fn events_for_unknown_sessions_are_ignored() {
     let mut x = t();
     let term = x.term();
-    let mut b = SpawnSpec::default();
-    b.program = "other".into();
+    let b = SpawnSpec { program: "other".into(), ..Default::default() };
     // A session the editor has no buffer for (spawned directly on the backend).
     let stray = x.ed.pty_backend().unwrap().spawn(b).unwrap();
     x.h.output(stray, b"stray");

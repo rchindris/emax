@@ -485,8 +485,9 @@ fn waker_fires_for_output_and_exit() {
 #[test]
 fn many_sessions_in_parallel() {
     let mut b = backend();
-    let ids: Vec<SessionId> =
-        (0..32).map(|i| b.spawn(sh(&format!("echo session-$((40 + {i})); read x; echo got-$x; exit {i}"))).unwrap()).collect();
+    let ids: Vec<SessionId> = (0..32)
+        .map(|i| b.spawn(sh(&format!("echo session-$((40 + {i})); read x; echo got-$x; exit {i}"))).unwrap())
+        .collect();
     let mut seen = Seen::default();
     seen.until(&mut b, "every session started", |s| {
         ids.iter().enumerate().all(|(i, id)| s.text(*id).contains(&format!("session-{}", 40 + i)))
@@ -598,7 +599,8 @@ fn quick_exits_never_lose_output() {
     // Programs that print and exit at once race the reader's start-up.
     let mut b = backend();
     let mut seen = Seen::default();
-    let ids: Vec<SessionId> = (0..200).map(|i| b.spawn(spec("/bin/echo", &["quick", &i.to_string()])).unwrap()).collect();
+    let ids: Vec<SessionId> =
+        (0..200).map(|i| b.spawn(spec("/bin/echo", &["quick", &i.to_string()])).unwrap()).collect();
     for (i, id) in ids.iter().enumerate() {
         seen.until_exit(&mut b, *id);
         assert_eq!(seen.text(*id), format!("quick {i}\r\n"), "session {i} {:?}", seen.exited(*id));

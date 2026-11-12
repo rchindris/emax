@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+use super::buffer::BufferKind;
 use super::cursor::Cursor;
 use super::editor::{Args, Editor, RawArg, Scroll};
 use super::modes::MinorMode;
@@ -154,11 +155,15 @@ commands! {
     "previous-buffer" => previous_buffer, NO_UNDO, "Show the most recently used other buffer; repeat to cycle back.";
     "next-buffer" => next_buffer, NO_UNDO, "Cycle forward through buffers (inverse of previous-buffer).";
     "kill-buffer" => kill_buffer, NO_UNDO, "Kill the current buffer (press twice if it has unsaved changes).";
+    "quit-window" => quit_window, NO_UNDO, "Bury this buffer: show the most recently used other one instead.";
 
     // files & app
+    "find-file" => find_file, NO_UNDO, "Open a file: type its path, with fuzzy completion of each directory's entries.";
     "save-buffer" => save_buffer, NO_UNDO, "Save the current buffer to its file.";
     "save-buffers-kill-terminal" => quit, NO_UNDO, "Exit (asks for a second press if the buffer is modified).";
     "execute-extended-command" => execute_extended, NO_UNDO, "Pick a command by name (fuzzy) and run it.";
+    "open-settings" => open_settings, NO_UNDO, "Edit the settings in a searchable list; changes are saved to the settings file and apply at once.";
+    "open-settings-json" => open_settings_json, NO_UNDO, "Visit the settings file (created if it doesn't exist); saving it applies it.";
 
     // minor modes (major mode commands come from the configuration)
     "auto-fill-mode" => auto_fill_mode, NO_UNDO, "Toggle breaking lines at fill-column while typing (with N: on if N > 0).";
@@ -169,7 +174,8 @@ commands! {
 
 /// Every built-in command table: the editing commands here, then each
 /// subsystem's.
-pub static TABLES: &[&[Command]] = &[COMMANDS, super::window::COMMANDS, super::term::buffer::COMMANDS];
+pub static TABLES: &[&[Command]] =
+    &[COMMANDS, super::window::COMMANDS, super::term::buffer::COMMANDS, super::dired::COMMANDS];
 
 /// Every built-in command (major mode commands come from the configuration).
 pub fn all() -> impl Iterator<Item = &'static Command> {
@@ -178,10 +184,7 @@ pub fn all() -> impl Iterator<Item = &'static Command> {
 
 pub fn lookup(name: &str) -> Option<&'static Command> {
     static INDEX: OnceLock<HashMap<&'static str, &'static Command>> = OnceLock::new();
-    INDEX
-        .get_or_init(|| all().map(|c| (c.name, c)).collect())
-        .get(name)
-        .copied()
+    INDEX.get_or_init(|| all().map(|c| (c.name, c)).collect()).get(name).copied()
 }
 
 fn err<T>(s: &str) -> Result<T, String> {
@@ -421,8 +424,8 @@ fn set_mark_command(ed: &mut Editor, a: &Args) -> CmdResult {
             Ok(())
         });
     }
-    let repeat_empty = ed.last_command == "set-mark-command"
-        && ed.cursors.iter().all(|c| c.region().is_some_and(|r| r.is_empty()));
+    let repeat_empty =
+        ed.last_command == "set-mark-command" && ed.cursors.iter().all(|c| c.region().is_some_and(|r| r.is_empty()));
     for c in &mut ed.cursors {
         if repeat_empty {
             c.deactivate();
@@ -465,7 +468,11 @@ fn mark_word(ed: &mut Editor, a: &Args) -> CmdResult {
         let from = if c.active { c.mark.unwrap_or(c.point) } else { c.point };
         let to = forward_word_n(r, from, n);
         let c = &mut ed.cursors[i];
-        if c.active { c.mark = Some(to) } else { c.push_mark(to, true) }
+        if c.active {
+            c.mark = Some(to)
+        } else {
+            c.push_mark(to, true)
+        }
         Ok(())
     })
 }
@@ -489,7 +496,11 @@ fn mark_sexp(ed: &mut Editor, a: &Args) -> CmdResult {
         let from = if c.active { c.mark.unwrap_or(c.point) } else { c.point };
         let to = repeat_sexp(&ed.buf.rope, n, from)?;
         let c = &mut ed.cursors[i];
-        if c.active { c.mark = Some(to) } else { c.push_mark(to, true) }
+        if c.active {
+            c.mark = Some(to)
+        } else {
+            c.push_mark(to, true)
+        }
         Ok(())
     })
 }
@@ -891,10 +902,10 @@ fn self_insert(ed: &mut Editor, a: &Args) -> CmdResult {
         _ => None,
     };
     ed.each(|ed, i| {
-        if let Some(c) = pair {
-            if electric_pair(ed, i, c) {
-                return Ok(());
-            }
+        if let Some(c) = pair
+            && electric_pair(ed, i, c)
+        {
+            return Ok(());
         }
         let had_region = ed.delete_active_region(i);
         if let Some(width) = fill {
@@ -963,7 +974,8 @@ fn auto_fill(ed: &mut Editor, i: usize, width: usize) {
         let ls = line_start(r, p);
         let ie = indentation_end(r, ls).min(p);
         let blank = |b: usize| char_at(r, b).is_some_and(is_hspace);
-        let Some(b) = (ie..p).rev().find(|&b| blank(b) && b - ls <= width).or_else(|| (ie..p).find(|&b| blank(b))) else {
+        let Some(b) = (ie..p).rev().find(|&b| blank(b) && b - ls <= width).or_else(|| (ie..p).find(|&b| blank(b)))
+        else {
             return;
         };
         let (mut s, mut e) = (b, b);
@@ -1411,12 +1423,7 @@ fn mc_mark_all(ed: &mut Editor, _: &Args) -> CmdResult {
 }
 
 fn furthest_non_primary(ed: &Editor) -> Option<usize> {
-    ed.cursors
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.id != ed.primary)
-        .max_by_key(|(_, c)| c.id)
-        .map(|(i, _)| i)
+    ed.cursors.iter().enumerate().filter(|(_, c)| c.id != ed.primary).max_by_key(|(_, c)| c.id).map(|(i, _)| i)
 }
 
 fn mc_unmark_next(ed: &mut Editor, _: &Args) -> CmdResult {
@@ -1498,6 +1505,12 @@ fn next_buffer(ed: &mut Editor, _: &Args) -> CmdResult {
     Ok(())
 }
 
+fn quit_window(ed: &mut Editor, _: &Args) -> CmdResult {
+    let Some(id) = ed.others.first().map(|s| s.id) else { return err("No other buffer") };
+    ed.switch_to_buffer_ex(id, true);
+    Ok(())
+}
+
 fn kill_buffer(ed: &mut Editor, _: &Args) -> CmdResult {
     let name = ed.buf.name.clone();
     if ed.buf.modified() && ed.buf.path.is_some() && ed.last_command != "kill-buffer" {
@@ -1511,7 +1524,27 @@ fn kill_buffer(ed: &mut Editor, _: &Args) -> CmdResult {
 
 // ============================================================ files & app
 
+fn open_settings(ed: &mut Editor, _: &Args) -> CmdResult {
+    ed.open_settings();
+    Ok(())
+}
+
+fn open_settings_json(ed: &mut Editor, _: &Args) -> CmdResult {
+    ed.open_settings_json();
+    Ok(())
+}
+
+fn find_file(ed: &mut Editor, _: &Args) -> CmdResult {
+    ed.open_file_picker();
+    Ok(())
+}
+
 fn save_buffer(ed: &mut Editor, _: &Args) -> CmdResult {
+    // Like Emacs, a text buffer with no file asks for one (and then visits it).
+    if ed.buf.path.is_none() && ed.buf.kind == BufferKind::Text {
+        ed.open_save_picker();
+        return Ok(());
+    }
     if !ed.buf.modified() && ed.buf.path.is_some() {
         return err("(No changes need to be saved)");
     }

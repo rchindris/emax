@@ -22,10 +22,18 @@ pub struct Key {
 impl Key {
     pub fn canonical(&self) -> String {
         let mut s = String::new();
-        if self.ctrl { s.push_str("C-"); }
-        if self.meta { s.push_str("M-"); }
-        if self.shift { s.push_str("S-"); }
-        if self.sup { s.push_str("s-"); }
+        if self.ctrl {
+            s.push_str("C-");
+        }
+        if self.meta {
+            s.push_str("M-");
+        }
+        if self.shift {
+            s.push_str("S-");
+        }
+        if self.sup {
+            s.push_str("s-");
+        }
         s.push_str(&self.name);
         s
     }
@@ -35,10 +43,26 @@ impl Key {
         let mut k = Key::default();
         let mut rest = s;
         loop {
-            if let Some(r) = rest.strip_prefix("C-") { k.ctrl = true; rest = r; continue; }
-            if let Some(r) = rest.strip_prefix("M-") { k.meta = true; rest = r; continue; }
-            if let Some(r) = rest.strip_prefix("S-") { k.shift = true; rest = r; continue; }
-            if let Some(r) = rest.strip_prefix("s-") { k.sup = true; rest = r; continue; }
+            if let Some(r) = rest.strip_prefix("C-") {
+                k.ctrl = true;
+                rest = r;
+                continue;
+            }
+            if let Some(r) = rest.strip_prefix("M-") {
+                k.meta = true;
+                rest = r;
+                continue;
+            }
+            if let Some(r) = rest.strip_prefix("S-") {
+                k.shift = true;
+                rest = r;
+                continue;
+            }
+            if let Some(r) = rest.strip_prefix("s-") {
+                k.sup = true;
+                rest = r;
+                continue;
+            }
             break;
         }
         // A bare "-" after modifiers (e.g. "M--") is the key itself.
@@ -72,10 +96,11 @@ impl Key {
             "SPC" => return Some(" ".into()),
             _ => {}
         }
-        if let Some(t) = &self.text {
-            if !t.is_empty() && !t.chars().any(char::is_control) {
-                return Some(t.clone());
-            }
+        if let Some(t) = &self.text
+            && !t.is_empty()
+            && !t.chars().any(char::is_control)
+        {
+            return Some(t.clone());
         }
         (self.name.chars().count() == 1).then(|| self.name.clone())
     }
@@ -264,21 +289,23 @@ impl Dispatcher {
         }
 
         // Digits and '-' continue a prefix argument.
-        if self.pending.is_empty() && key.is_plain() && !key.shift {
-            if let Some(st) = self.arg {
-                if let Some(d) = key.name.chars().next().and_then(|c| c.to_digit(10)).filter(|_| key.name.len() == 1) {
-                    let (neg, value) = match st {
-                        ArgState::Universal(_) => (false, None),
-                        ArgState::Digits { neg, value } => (neg, value),
-                    };
-                    let v = value.unwrap_or(0).saturating_mul(10).saturating_add(d as i64);
-                    self.arg = Some(ArgState::Digits { neg, value: Some(v) });
-                    return Outcome::Pending(self.echo());
-                }
-                if key.name == "-" && matches!(st, ArgState::Universal(_) | ArgState::Digits { value: None, .. }) {
-                    self.arg = Some(ArgState::Digits { neg: true, value: None });
-                    return Outcome::Pending(self.echo());
-                }
+        if self.pending.is_empty()
+            && key.is_plain()
+            && !key.shift
+            && let Some(st) = self.arg
+        {
+            if let Some(d) = key.name.chars().next().and_then(|c| c.to_digit(10)).filter(|_| key.name.len() == 1) {
+                let (neg, value) = match st {
+                    ArgState::Universal(_) => (false, None),
+                    ArgState::Digits { neg, value } => (neg, value),
+                };
+                let v = value.unwrap_or(0).saturating_mul(10).saturating_add(d as i64);
+                self.arg = Some(ArgState::Digits { neg, value: Some(v) });
+                return Outcome::Pending(self.echo());
+            }
+            if key.name == "-" && matches!(st, ArgState::Universal(_) | ArgState::Digits { value: None, .. }) {
+                self.arg = Some(ArgState::Digits { neg: true, value: None });
+                return Outcome::Pending(self.echo());
             }
         }
 
@@ -289,24 +316,25 @@ impl Dispatcher {
             Binding::Unbound => None,
         };
         // Shift-translation: S-<right> runs <right>'s command with shift selection.
-        if found.is_none() {
-            if let Some(unshifted) = key.unshifted() {
-                let mut seq = self.pending.clone();
-                *seq.last_mut().unwrap() = unshifted;
-                if let Binding::Command(c) = lookup_in(maps, &seq) {
-                    found = Some((c, true));
-                }
+        if found.is_none()
+            && let Some(unshifted) = key.unshifted()
+        {
+            let mut seq = self.pending.clone();
+            *seq.last_mut().unwrap() = unshifted;
+            if let Binding::Command(c) = lookup_in(maps, &seq) {
+                found = Some((c, true));
             }
         }
         let seq = std::mem::take(&mut self.pending);
 
         let Some((cmd, shift)) = found else {
-            if seq.len() == 1 && key.is_plain() {
-                if let Some(t) = key.text.clone().filter(|t| !t.is_empty() && !t.chars().any(char::is_control)) {
-                    let mut args = self.take_args();
-                    args.text = Some(t);
-                    return Outcome::Run("self-insert-command", args);
-                }
+            if seq.len() == 1
+                && key.is_plain()
+                && let Some(t) = key.text.clone().filter(|t| !t.is_empty() && !t.chars().any(char::is_control))
+            {
+                let mut args = self.take_args();
+                args.text = Some(t);
+                return Outcome::Run("self-insert-command", args);
             }
             self.arg = None;
             return Outcome::Undefined(seq.join(" "));
@@ -421,6 +449,8 @@ mod tests {
         assert_eq!(where_is(&maps, "forward-char").as_deref(), Some("<right>"));
         assert_eq!(where_is(&maps, "forward-word").as_deref(), Some("C-f"));
         assert!(matches!(d.invoke("zap-to-char", Args::default()), Outcome::Pending(_)));
-        assert!(matches!(run_in(&mut d, &maps, "x"), Outcome::Run("zap-to-char", ref a) if a.text.as_deref() == Some("x")));
+        assert!(
+            matches!(run_in(&mut d, &maps, "x"), Outcome::Run("zap-to-char", ref a) if a.text.as_deref() == Some("x"))
+        );
     }
 }

@@ -99,7 +99,8 @@ impl Editor {
     /// selected window stays selected.
     pub fn split_window(&mut self, dir: SplitDir) -> Result<WindowId, String> {
         let sel = self.layout.selected();
-        let rect = tree::window_rect(&self.layout.tab().root, self.layout.frame_rect(), sel).ok_or("No selected window")?;
+        let rect =
+            tree::window_rect(&self.layout.tab().root, self.layout.frame_rect(), sel).ok_or("No selected window")?;
         if dir.extent(rect) < 2.0 * dir.min_extent() {
             return Err("Window too small for splitting".into());
         }
@@ -195,7 +196,9 @@ impl Editor {
         let scroll_line = self.layout.window(sel).map_or(0, |w| w.scroll_line);
         // The cursor's cell on screen (text rows exclude the mode line).
         let reference = match towards {
-            Direction::Left | Direction::Right => r.y + (line.saturating_sub(scroll_line) as f32).min((r.h - 2.0).max(0.0)) + 0.5,
+            Direction::Left | Direction::Right => {
+                r.y + (line.saturating_sub(scroll_line) as f32).min((r.h - 2.0).max(0.0)) + 0.5
+            }
             Direction::Up | Direction::Down => r.x + (col as f32).min((r.w - 1.0).max(0.0)) + 0.5,
         };
         let target = tree::neighbour(root, area, sel, towards, reference)
@@ -314,7 +317,11 @@ impl Editor {
         if let Some(n) = &tab.name {
             return n.clone();
         }
-        let buf = if i == self.layout.current_tab { Some(self.buf_id) } else { self.layout.window(tab.selected).map(|w| w.buffer) };
+        let buf = if i == self.layout.current_tab {
+            Some(self.buf_id)
+        } else {
+            self.layout.window(tab.selected).map(|w| w.buffer)
+        };
         buf.and_then(|b| self.buffer_name(b)).unwrap_or_default().to_string()
     }
 

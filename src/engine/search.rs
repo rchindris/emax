@@ -286,7 +286,12 @@ impl Editor {
         } else {
             self.buf.rope.line_to_char(line) + s.match_col(line)
         };
-        let mut c = s.origin_cursors.iter().find(|c| c.id == s.origin_primary).cloned().unwrap_or_else(|| Cursor::new(s.origin_primary, 0));
+        let mut c = s
+            .origin_cursors
+            .iter()
+            .find(|c| c.id == s.origin_primary)
+            .cloned()
+            .unwrap_or_else(|| Cursor::new(s.origin_primary, 0));
         c.point = pos;
         c.goal_col = None;
         c.deactivate();

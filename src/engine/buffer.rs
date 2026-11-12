@@ -9,6 +9,7 @@ use ropey::Rope;
 
 use super::cursor::Cursor;
 use super::modes::BufferModes;
+use super::syntax::Syntax;
 
 /// A change undo or redo made to the text: chars `start..end` were replaced
 /// by `inserted` chars (the shape `Cursor::adjust` takes).
@@ -51,6 +52,9 @@ pub enum BufferKind {
     /// A terminal: its screen is in `Editor.terminals`; the rope holds the
     /// text copy only in copy mode.
     Terminal,
+    /// A directory listing (dired): what each line stands for is in
+    /// `Editor.direds`.
+    Dired,
 }
 
 pub struct Buffer {
@@ -60,6 +64,9 @@ pub struct Buffer {
     pub name: String,
     /// Major and minor modes, buffer-local settings (set by the editor).
     pub modes: BufferModes,
+    /// The syntax tree, if the major mode names a language (kept by
+    /// `Editor::update_syntax`; every edit below is recorded in it).
+    pub syntax: Option<Box<Syntax>>,
     undo: Vec<Group>,
     redo: Vec<Group>,
     open: Option<Group>,
@@ -77,6 +84,7 @@ impl Buffer {
             path: None,
             name: name.into(),
             modes: BufferModes::default(),
+            syntax: None,
             undo: Vec::new(),
             redo: Vec::new(),
             open: None,
@@ -86,15 +94,9 @@ impl Buffer {
     }
 
     pub fn open(path: PathBuf) -> std::io::Result<Self> {
-        let rope = if path.exists() {
-            Rope::from_reader(BufReader::new(File::open(&path)?))?
-        } else {
-            Rope::new()
-        };
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
+        let rope = if path.exists() { Rope::from_reader(BufReader::new(File::open(&path)?))? } else { Rope::new() };
+        let name =
+            path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
         let mut b = Self::from_str(&name, "");
         b.rope = rope;
         b.path = Some(path);
@@ -120,6 +122,7 @@ impl Buffer {
     /// Returns the replaced text.
     pub fn replace(&mut self, range: Range<usize>, text: &str) -> String {
         let old = self.rope.slice(range.clone()).to_string();
+        self.record_edit(range.start, range.len(), text);
         if !range.is_empty() {
             self.rope.remove(range.clone());
         }
@@ -132,17 +135,19 @@ impl Buffer {
         old
     }
 
+    /// Tell the syntax tree that `old_chars` chars at `start` are about to
+    /// be replaced by `new`.
+    fn record_edit(&mut self, start: usize, old_chars: usize, new: &str) {
+        if let Some(s) = self.syntax.as_mut() {
+            s.record_edit(&self.rope, start, old_chars, new);
+        }
+    }
+
     // --------------------------------------------------------------- undo
 
     pub fn begin_group(&mut self, cursors: &[Cursor], amalgamate: bool) {
-        self.open = Some(Group {
-            id: 0,
-            edits: Vec::new(),
-            before: cursors.to_vec(),
-            after: Vec::new(),
-            amalgamate,
-            count: 1,
-        });
+        self.open =
+            Some(Group { id: 0, edits: Vec::new(), before: cursors.to_vec(), after: Vec::new(), amalgamate, count: 1 });
     }
 
     /// Close the open group. Returns true if the command changed the buffer.
@@ -154,10 +159,8 @@ impl Buffer {
         g.after = cursors.to_vec();
         self.redo.clear();
         if let Some(top) = self.undo.last_mut() {
-            let mergeable = g.amalgamate
-                && top.amalgamate
-                && top.count < AMALGAMATE_LIMIT
-                && Some(top.id) != self.saved_id;
+            let mergeable =
+                g.amalgamate && top.amalgamate && top.count < AMALGAMATE_LIMIT && Some(top.id) != self.saved_id;
             if mergeable {
                 top.edits.extend(g.edits);
                 top.after = g.after;
@@ -194,6 +197,7 @@ impl Buffer {
         let mut changes = Vec::with_capacity(edits.len());
         for e in edits.iter().rev() {
             let n = e.new.chars().count();
+            self.record_edit(e.pos, n, &e.old);
             self.rope.remove(e.pos..e.pos + n);
             self.rope.insert(e.pos, &e.old);
             changes.push(Change { start: e.pos, end: e.pos + n, inserted: e.old.chars().count() });
@@ -206,6 +210,7 @@ impl Buffer {
         let mut changes = Vec::with_capacity(edits.len());
         for e in edits {
             let n = e.old.chars().count();
+            self.record_edit(e.pos, n, &e.new);
             self.rope.remove(e.pos..e.pos + n);
             self.rope.insert(e.pos, &e.new);
             changes.push(Change { start: e.pos, end: e.pos + n, inserted: e.new.chars().count() });

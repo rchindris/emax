@@ -28,7 +28,8 @@ fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
 /// A fresh directory for one test's socket (short: socket paths are limited).
 fn temp_dir(tag: &str) -> PathBuf {
     static N: AtomicUsize = AtomicUsize::new(0);
-    let d = std::env::temp_dir().join(format!("emax-i{}-{tag}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+    let d =
+        std::env::temp_dir().join(format!("emax-i{}-{tag}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -44,10 +45,10 @@ fn read_until(b: &mut DaemonBackend, id: SessionId, needle: &str) -> String {
     let mut out = Vec::new();
     wait_until(&format!("{needle:?} in the output"), || {
         while let Some(e) = b.try_recv() {
-            if let PtyEvent::Output(s, d) = e {
-                if s == id {
-                    out.extend_from_slice(&d);
-                }
+            if let PtyEvent::Output(s, d) = e
+                && s == id
+            {
+                out.extend_from_slice(&d);
             }
         }
         String::from_utf8_lossy(&out).contains(needle)
@@ -133,7 +134,14 @@ fn a_stale_socket_is_replaced_by_a_new_daemon() {
 fn an_idle_daemon_goes_away() {
     let dir = temp_dir("idle");
     let socket = dir.join("d.sock");
-    let b = DaemonBackend::connect_or_start_with(Path::new(EMAX), &socket, 1024, Some(Duration::from_secs(1)), noop_waker()).unwrap();
+    let b = DaemonBackend::connect_or_start_with(
+        Path::new(EMAX),
+        &socket,
+        1024,
+        Some(Duration::from_secs(1)),
+        noop_waker(),
+    )
+    .unwrap();
     drop(b);
     wait_until("the idle daemon to exit", || !socket.exists());
     std::fs::remove_dir_all(dir).unwrap();

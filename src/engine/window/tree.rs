@@ -150,22 +150,18 @@ impl Node {
     /// nesting. Returns false if `target` isn't in the tree.
     pub fn split_window(&mut self, target: WindowId, new: WindowId, dir: SplitDir) -> bool {
         let Some(path) = self.path_to(target) else { return false };
-        if let Some((&i, parent)) = path.split_last() {
-            if let Node::Split { dir: d, children, ratios } = self.at_mut(parent) {
-                if *d == dir {
-                    let half = ratios[i] / 2.0;
-                    ratios[i] = half;
-                    ratios.insert(i + 1, half);
-                    children.insert(i + 1, Node::Leaf(new));
-                    return true;
-                }
-            }
+        if let Some((&i, parent)) = path.split_last()
+            && let Node::Split { dir: d, children, ratios } = self.at_mut(parent)
+            && *d == dir
+        {
+            let half = ratios[i] / 2.0;
+            ratios[i] = half;
+            ratios.insert(i + 1, half);
+            children.insert(i + 1, Node::Leaf(new));
+            return true;
         }
-        *self.at_mut(&path) = Node::Split {
-            dir,
-            children: vec![Node::Leaf(target), Node::Leaf(new)],
-            ratios: vec![0.5, 0.5],
-        };
+        *self.at_mut(&path) =
+            Node::Split { dir, children: vec![Node::Leaf(target), Node::Leaf(new)], ratios: vec![0.5, 0.5] };
         true
     }
 
@@ -255,7 +251,7 @@ impl Node {
         if ratios.len() != children.len() {
             return Err(format!("{} ratios for {} children", ratios.len(), children.len()));
         }
-        if ratios.iter().any(|r| !(*r > 0.0)) {
+        if ratios.iter().any(|r| r.is_nan() || *r <= 0.0) {
             return Err(format!("non-positive ratio in {ratios:?}"));
         }
         let sum: f32 = ratios.iter().sum();
@@ -335,7 +331,13 @@ pub fn window_rect(root: &Node, area: Rect, id: WindowId) -> Option<Rect> {
 /// preceding ones; shrinking gives the space to the next sibling (or the
 /// previous one if it is last). The change is clamped so that every window
 /// keeps its minimum size; returns the signed number of cells actually moved.
-pub fn resize_window(root: &mut Node, area: Rect, target: WindowId, dir: SplitDir, delta: i64) -> Result<i64, ResizeError> {
+pub fn resize_window(
+    root: &mut Node,
+    area: Rect,
+    target: WindowId,
+    dir: SplitDir,
+    delta: i64,
+) -> Result<i64, ResizeError> {
     let path = root.path_to(target).ok_or(ResizeError::NoWindow)?;
     let depth = (0..path.len())
         .rev()
@@ -345,7 +347,8 @@ pub fn resize_window(root: &mut Node, area: Rect, target: WindowId, dir: SplitDi
     let split_area = rect_at(root, area, split_path);
     let Node::Split { children, ratios, .. } = root.at_mut(split_path) else { unreachable!("found a split") };
 
-    let mut sizes: Vec<i64> = child_rects(dir, ratios, split_area).iter().map(|r| dir.extent(*r).round() as i64).collect();
+    let mut sizes: Vec<i64> =
+        child_rects(dir, ratios, split_area).iter().map(|r| dir.extent(*r).round() as i64).collect();
     let mins: Vec<i64> = children.iter().map(|c| c.min_extent(dir).round() as i64).collect();
     let slack = |sizes: &[i64], j: usize| (sizes[j] - mins[j]).max(0);
     let moved = if delta > 0 {
@@ -401,9 +404,10 @@ pub fn fit(node: &mut Node, area: Rect) {
     let mins: Vec<i64> = children.iter().map(|c| c.min_extent(*dir).round() as i64).collect();
     let fits = mins.iter().sum::<i64>() <= sizes.iter().sum::<i64>();
     let mut changed = false;
-    while fits {
-        let Some(short) = (0..sizes.len()).find(|&j| sizes[j] < mins[j]) else { break };
-        let Some(donor) = (0..sizes.len()).filter(|&j| sizes[j] > mins[j]).max_by_key(|&j| sizes[j] - mins[j]) else { break };
+    while fits && let Some(short) = (0..sizes.len()).find(|&j| sizes[j] < mins[j]) {
+        let Some(donor) = (0..sizes.len()).filter(|&j| sizes[j] > mins[j]).max_by_key(|&j| sizes[j] - mins[j]) else {
+            break;
+        };
         let n = (mins[short] - sizes[short]).min(sizes[donor] - mins[donor]);
         sizes[short] += n;
         sizes[donor] -= n;
@@ -439,7 +443,15 @@ pub fn neighbour(root: &Node, area: Rect, from: WindowId, towards: Direction, re
     });
     let candidates: Vec<_> = candidates.collect();
     let nearest = candidates.iter().map(|c| c.1).fold(f32::INFINITY, f32::min);
-    let off_by = |lo: f32, hi: f32| if reference < lo { lo - reference } else if reference >= hi { reference - hi + EPS } else { 0.0 };
+    let off_by = |lo: f32, hi: f32| {
+        if reference < lo {
+            lo - reference
+        } else if reference >= hi {
+            reference - hi + EPS
+        } else {
+            0.0
+        }
+    };
     candidates
         .iter()
         .filter(|c| c.1 <= nearest + EPS)

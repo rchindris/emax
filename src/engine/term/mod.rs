@@ -71,7 +71,11 @@ impl Palette {
             16..=231 => {
                 const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
                 let n = i - 16;
-                rgb_to_rgba(Rgb { r: LEVELS[(n / 36) as usize], g: LEVELS[(n / 6 % 6) as usize], b: LEVELS[(n % 6) as usize] })
+                rgb_to_rgba(Rgb {
+                    r: LEVELS[(n / 36) as usize],
+                    g: LEVELS[(n / 6 % 6) as usize],
+                    b: LEVELS[(n % 6) as usize],
+                })
             }
             232..=255 => {
                 let v = 8 + 10 * (i - 232);
@@ -177,7 +181,10 @@ pub struct Run {
 impl Run {
     /// Nothing to draw: spaces on the terminal's background.
     pub fn is_blank(&self, background: Rgba) -> bool {
-        self.bg == background && self.text.chars().all(|c| c == ' ') && !self.flags.underline && !self.flags.strikethrough
+        self.bg == background
+            && self.text.chars().all(|c| c == ' ')
+            && !self.flags.underline
+            && !self.flags.strikethrough
     }
 }
 
@@ -571,7 +578,8 @@ impl Terminal {
             VteCursorShape::HollowBlock => CursorShape::HollowBlock,
             VteCursorShape::Hidden => CursorShape::Block,
         };
-        let shown = self.term.mode().contains(TermMode::SHOW_CURSOR) && self.term.cursor_style().shape != VteCursorShape::Hidden;
+        let shown = self.term.mode().contains(TermMode::SHOW_CURSOR)
+            && self.term.cursor_style().shape != VteCursorShape::Hidden;
         // A cursor out of view (below a scrolled-back view) still names a row on screen.
         let row = row.clamp(0, grid.screen_lines() as i32 - 1) as usize;
         CursorState { row, col, shape, visible: shown && in_view }

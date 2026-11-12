@@ -118,7 +118,9 @@ impl Daemon {
         let socket = dir.join("d.sock");
         let bound = bind(&socket).expect("bind");
         let opts = DaemonOptions { socket: socket.clone(), replay_bytes: 1 << 20, idle_exit: None };
-        let thread = thread::spawn(move || serve(bound, &opts, |w: Waker| Box::new(LocalBackend::new(w)) as Box<dyn PtyBackend>));
+        let thread = thread::spawn(move || {
+            serve(bound, &opts, |w: Waker| Box::new(LocalBackend::new(w)) as Box<dyn PtyBackend>)
+        });
         Self { dir, socket, thread: Some(thread) }
     }
 
@@ -284,7 +286,12 @@ fn sessions_are_restored_into_a_new_editor_and_reattach_through_the_daemon() {
 
     let saved = session::load(&file).expect("the session file was written");
     assert_eq!(saved.tabs.len(), 2);
-    assert!(saved.buffers.iter().any(|b| matches!(b.kind, SavedBufferKind::Terminal { session, .. } if session == session_id)));
+    assert!(
+        saved
+            .buffers
+            .iter()
+            .any(|b| matches!(b.kind, SavedBufferKind::Terminal { session, .. } if session == session_id))
+    );
 
     // The process lives on while no editor is attached.
     {
@@ -380,10 +387,14 @@ fn hooks_see_terminal_events_in_order() {
     let log = Rc::new(RefCell::new(Vec::<Event>::new()));
     for kind in EventKind::ALL {
         let log = log.clone();
-        x.ed.hooks.add(kind, "record", Rc::new(move |_, e| {
-            log.borrow_mut().push(e.clone());
-            Ok(())
-        }));
+        x.ed.hooks.add(
+            kind,
+            "record",
+            Rc::new(move |_, e| {
+                log.borrow_mut().push(e.clone());
+                Ok(())
+            }),
+        );
     }
     // A timer the tick fires alongside terminal output.
     let t0 = Instant::now();
@@ -394,15 +405,20 @@ fn hooks_see_terminal_events_in_order() {
     x.wait_exit(buf);
 
     let events = log.borrow().clone();
-    let pos = |pred: &dyn Fn(&Event) -> bool| events.iter().position(|e| pred(e));
+    let pos = |pred: &dyn Fn(&Event) -> bool| events.iter().position(pred);
     let created = pos(&|e| matches!(e, Event::BufferCreated { buf: b } if *b == buf)).expect("BufferCreated");
     let window = pos(&|e| matches!(e, Event::WindowConfigurationChanged)).expect("WindowConfigurationChanged");
     let command = pos(&|e| matches!(e, Event::AfterCommand { name } if name == "term")).expect("AfterCommand");
     let output = pos(&|e| matches!(e, Event::TerminalOutput { buf: b } if *b == buf)).expect("TerminalOutput");
-    let title = pos(&|e| matches!(e, Event::TerminalTitle { buf: b, title } if *b == buf && title == "the-title")).expect("TerminalTitle");
+    let title = pos(&|e| matches!(e, Event::TerminalTitle { buf: b, title } if *b == buf && title == "the-title"))
+        .expect("TerminalTitle");
     let bell = pos(&|e| matches!(e, Event::TerminalBell { buf: b } if *b == buf)).expect("TerminalBell");
-    let exited = pos(&|e| matches!(e, Event::ProcessExited { buf: b, status } if *b == buf && status.code == 3)).expect("ProcessExited");
-    assert!(pos(&|e| matches!(e, Event::Timer { name, .. } if name == "soon")).is_some(), "the timer fired: {events:?}");
+    let exited = pos(&|e| matches!(e, Event::ProcessExited { buf: b, status } if *b == buf && status.code == 3))
+        .expect("ProcessExited");
+    assert!(
+        pos(&|e| matches!(e, Event::Timer { name, .. } if name == "soon")).is_some(),
+        "the timer fired: {events:?}"
+    );
 
     assert!(created < window && window < command, "{events:?}");
     assert!(command < output && output < title && title < bell && bell < exited, "{events:?}");
