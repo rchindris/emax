@@ -375,14 +375,10 @@ impl Editor {
             self.emit(e);
         }
         for (buf, status) in exited {
-            self.message = Some(exit_message(&self.buffer_name(buf), &status));
+            self.message = Some(exit_message(self.buffer_name(buf).unwrap_or_default(), &status));
             self.emit(Event::ProcessExited { buf, status });
         }
         any
-    }
-
-    fn buffer_name(&self, id: BufferId) -> String {
-        self.find_buffer(id).map(|v| v.buf.name.clone()).unwrap_or_default()
     }
 }
 

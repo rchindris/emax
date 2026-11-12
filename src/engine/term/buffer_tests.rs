@@ -138,7 +138,11 @@ fn term_spawns_the_shell_in_a_new_current_buffer() {
     assert_eq!(x.ed.terminal(term).unwrap().term.size(), (80, 24));
     assert_eq!(x.ed.terminal(term).unwrap().spec, spec);
     assert_eq!(x.ed.terminal(term).unwrap().mode, InputMode::Char);
-    assert_eq!(x.take_events(), [Event::BufferCreated { buf: term }], "hooks ran after the command");
+    assert_eq!(
+        x.take_events(),
+        [Event::BufferCreated { buf: term }, Event::WindowConfigurationChanged],
+        "hooks ran after the command; the window now shows the terminal"
+    );
 
     // Another one gets a unique name, the first one's size, and ansi-term is the same.
     x.ed.resize_terminal(term, 100, 30);
@@ -578,7 +582,11 @@ fn killing_the_buffer_kills_the_session() {
     // Late events from the dead session are ignored.
     x.h.output(session, b"late");
     x.tick();
-    assert_eq!(x.take_events(), [Event::BufferKilled { buf: term, name: "*term*".into() }]);
+    // The window switched away from the killed buffer before it went.
+    assert_eq!(
+        x.take_events(),
+        [Event::WindowConfigurationChanged, Event::BufferKilled { buf: term, name: "*term*".into() }]
+    );
 }
 
 // ----------------------------------------------------------------- resize
