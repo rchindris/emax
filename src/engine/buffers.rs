@@ -9,6 +9,7 @@ use super::cursor::Cursor;
 use super::editor::{Args, Editor, RawArg, Scroll};
 use super::hooks::Event;
 use super::keymap::{Key, Keymap, where_is};
+use super::line_edit::{self, FieldEdit};
 use super::picker::{Candidate, Picker, PickerKind};
 
 /// What the picker keymap can bind keys to.
@@ -16,6 +17,7 @@ pub const PICKER_ACTIONS: &[&str] = &[
     "picker-quit",
     "picker-accept",
     "picker-accept-input",
+    "picker-complete",
     "picker-next",
     "picker-previous",
     "picker-page-down",
@@ -314,11 +316,44 @@ impl Editor {
         match keymap.lookup(&[key.canonical()]) {
             Some(action) => self.picker_action(action),
             None => {
-                if let Some(t) = key.insertable_text() {
+                if let Some(cmd) = self.field_command(key) {
+                    self.picker_field_command(cmd);
+                } else if let Some(t) = key.insertable_text() {
                     let t = t.to_string();
                     self.picker_insert(&t);
                 }
             }
+        }
+    }
+
+    /// The global command `key` runs, if it is one a text field (the picker's
+    /// query, a settings field) can run: keys a field's keymap leaves unbound
+    /// edit the field the way they edit text, as in Emacs' minibuffer.
+    pub fn field_command(&self, key: &Key) -> Option<&'static str> {
+        self.modes.global.lookup(&[key.canonical()]).filter(|c| line_edit::FIELD_COMMANDS.contains(c))
+    }
+
+    /// Run text-field command `cmd` on `text`, the cursor being `tail` bytes
+    /// from the end; killed text goes to the kill ring and the clipboard.
+    pub(crate) fn run_field_command(&mut self, text: &mut String, tail: &mut usize, cmd: &str) -> Option<FieldEdit> {
+        let edit = line_edit::apply(text, tail, cmd, self.kill_ring.last().map(String::as_str))?;
+        if let FieldEdit::Killed(s) = &edit {
+            self.clipboard_in(s.clone());
+            self.clipboard_out = Some(s.clone());
+        }
+        Some(edit)
+    }
+
+    /// Run text-field command `cmd` on the picker's query.
+    pub fn picker_field_command(&mut self, cmd: &str) {
+        let Some(mut p) = self.picker.take() else { return };
+        p.confirm_kill = None;
+        p.message = None;
+        let edit = self.run_field_command(&mut p.query, &mut p.tail, cmd);
+        self.picker = Some(p);
+        if edit.is_some_and(|e| e != FieldEdit::Moved) {
+            self.picker.as_mut().unwrap().refilter();
+            self.sync_file_picker();
         }
     }
 
@@ -354,7 +389,7 @@ impl Editor {
                     }
                     return;
                 }
-                "picker-kill-buffer" => return,
+                "picker-kill-buffer" => return self.picker_field_command("kill-line"),
                 _ => {}
             }
         }
@@ -381,6 +416,14 @@ impl Editor {
                     self.switch_to_buffer_named(&name);
                 }
             }
+            // Put the selected candidate in the query (like vertico's TAB).
+            "picker-complete" => match p.selected_candidate().map(|c| c.label.clone()) {
+                Some(label) => {
+                    p.set_query(label);
+                    p.refilter();
+                }
+                None => p.message = Some("No match".into()),
+            },
             "picker-next" => p.move_by(1),
             "picker-previous" => p.move_by(-1),
             "picker-page-down" => p.move_clamped(10),

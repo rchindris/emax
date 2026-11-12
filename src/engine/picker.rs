@@ -3,6 +3,7 @@
 //! Used by switch-to-buffer, M-x and find-file.
 
 use super::editor::Args;
+use super::line_edit;
 
 /// What the picker is choosing.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -86,6 +87,8 @@ pub struct Picker {
     pub kind: PickerKind,
     pub prompt: String,
     pub query: String,
+    /// The cursor in `query`, as bytes after it (see `line_edit`).
+    pub tail: usize,
     pub candidates: Vec<Candidate>,
     pub matches: Vec<Match>,
     pub selected: usize,
@@ -100,6 +103,7 @@ impl Picker {
             kind: PickerKind::Buffers,
             prompt: prompt.into(),
             query: String::new(),
+            tail: 0,
             candidates,
             matches: Vec::new(),
             selected: 0,
@@ -203,21 +207,33 @@ impl Picker {
         self.selected = (self.selected as i64 + d).clamp(0, n - 1) as usize;
     }
 
+    /// Type `s` at the cursor.
     pub fn push_str(&mut self, s: &str) {
-        self.query.push_str(s);
+        line_edit::insert(&mut self.query, self.tail, s);
         self.refilter();
     }
 
+    /// Delete the character before the cursor.
     pub fn delete_char(&mut self) {
-        self.query.pop();
+        line_edit::delete_backward(&mut self.query, self.tail);
         self.refilter();
     }
 
+    /// Delete the word before the cursor.
     pub fn delete_word(&mut self) {
-        let trimmed = self.query.trim_end_matches(|c: char| !c.is_alphanumeric());
-        let cut = trimmed.rfind(|c: char| !c.is_alphanumeric()).map(|i| i + 1).unwrap_or(0);
-        self.query.truncate(cut);
+        line_edit::kill_word_backward(&mut self.query, self.tail);
         self.refilter();
+    }
+
+    /// Replace the whole query, with the cursor at the end.
+    pub fn set_query(&mut self, q: String) {
+        self.query = q;
+        self.tail = 0;
+    }
+
+    /// Whether the cursor is at the end of the query.
+    pub fn at_end(&self) -> bool {
+        self.tail == 0
     }
 }
 

@@ -126,25 +126,42 @@ impl Editor {
                 let typed = p.query.clone();
                 self.visit_typed(&typed);
             }
-            "picker-delete-char" if p.filter().is_empty() => {
-                p.query = parent_query(&p.query);
+            // At the end of a directory, DEL goes up to its parent.
+            "picker-delete-char" if p.filter().is_empty() && p.at_end() => {
+                p.set_query(parent_query(&p.query));
                 self.sync_file_picker();
             }
             "picker-delete-char" => {
-                p.query.pop();
+                p.delete_char();
                 self.sync_file_picker();
             }
-            // The last component: what is typed of it, else the directory itself.
-            "picker-delete-word" => {
+            // At the end: the last component, what is typed of it, else the directory itself.
+            "picker-delete-word" if p.at_end() => {
                 let keep = p.query.len() - p.filter().len();
                 if keep == p.query.len() {
-                    p.query = parent_query(&p.query);
+                    p.set_query(parent_query(&p.query));
                 } else {
                     p.query.truncate(keep);
                 }
                 self.sync_file_picker();
             }
-            "picker-kill-buffer" => {}
+            "picker-delete-word" => {
+                p.delete_word();
+                self.sync_file_picker();
+            }
+            // Complete the path to the selected entry: a directory is entered,
+            // a file is only put in the query (RET then opens it).
+            "picker-complete" => {
+                let PickerKind::Files { dir, .. } = &p.kind else { return false };
+                match p.selected_candidate().map(|c| format!("{dir}{}", c.label)) {
+                    Some(q) => {
+                        p.set_query(q);
+                        self.sync_file_picker();
+                    }
+                    None => p.message = Some("No match".into()),
+                }
+            }
+            "picker-kill-buffer" => self.picker_field_command("kill-line"),
             _ => return false,
         }
         true
@@ -155,7 +172,7 @@ impl Editor {
         let Some(p) = self.picker.as_mut() else { return };
         let Some(label) = p.matches.get(i).map(|m| p.candidates[m.index].label.clone()) else { return };
         let PickerKind::Files { dir, .. } = &p.kind else { return };
-        p.query = format!("{dir}{label}");
+        p.set_query(format!("{dir}{label}"));
         if label.ends_with('/') {
             self.sync_file_picker();
         } else {
@@ -199,7 +216,8 @@ impl Editor {
             } else if typed.ends_with('/') {
                 p.message = Some(format!("{} is a directory", abbreviate(&path)));
             } else {
-                p.query.push('/');
+                let q = format!("{}/", p.query);
+                p.set_query(q);
                 self.sync_file_picker();
             }
             return;
