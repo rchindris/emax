@@ -116,7 +116,8 @@ echo area and on stderr.
 
 ### Themes
 
-emax comes with `emax-dark` and `emax-light`. A theme is a set of colors
+emax comes with `emax-dark`, `emax-light`, `solarized-dark` and
+`solarized-light`. A theme is a set of colors
 written as `#rrggbb` or `#rrggbbaa`. `emax --print-default-config` lists every
 color name with its value in both built-in themes.
 
