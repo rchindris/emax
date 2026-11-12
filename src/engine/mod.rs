@@ -19,6 +19,8 @@ pub mod theme;
 pub mod window;
 
 #[cfg(test)]
+mod e2e_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 pub(crate) mod testutil;

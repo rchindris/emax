@@ -71,11 +71,14 @@ pub struct EmaxView {
     timer_task: Option<Task<()>>,
     /// The deadline `timer_task` waits for.
     timer_deadline: Option<Instant>,
+    /// Width of a terminal cell in pixels, measured each render.
+    cell_w: f32,
 }
 
 impl EmaxView {
     pub fn new(mut ed: Editor, keymaps: Keymaps, appearance: Appearance, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let echo = ed.message.clone().map(SharedString::from);
+        let cell_w = term_view::cell_width(appearance.fonts.size);
         // PTY backends call the waker from their threads; the view ticks the
         // editor on its own thread when it fires (wake-ups coalesce).
         let (wake_tx, mut wake_rx) = futures::channel::mpsc::unbounded::<()>();
@@ -91,6 +94,21 @@ impl EmaxView {
             }
         })
         .detach();
+        // Closing the window or quitting the app (Cmd-Q, the menu) runs the
+        // kill-emacs hooks too, so the session is saved however emax ends.
+        cx.on_app_quit(|view: &mut Self, _| {
+            view.ed.exit();
+            async {}
+        })
+        .detach();
+        let this = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |_, cx| {
+            let _ = this.update(cx, |view, cx| {
+                view.ed.exit();
+                cx.quit();
+            });
+            true
+        });
         // Follow the system's light/dark switch while running.
         cx.observe_window_appearance(window, |this, window, cx| {
             this.dark = is_dark(window.appearance());
@@ -114,6 +132,7 @@ impl EmaxView {
             dark: is_dark(window.appearance()),
             timer_task: None,
             timer_deadline: None,
+            cell_w,
         }
     }
 
@@ -1066,7 +1085,7 @@ impl EmaxView {
                     let (cols, rows) = term_view::grid_size(
                         r.w - border,
                         r.h - self.modeline_height() - panel,
-                        term_view::cell_width(fonts.size),
+                        self.cell_w,
                         lh,
                     );
                     self.ed.resize_terminal(m.buf, cols, rows);
@@ -1074,7 +1093,7 @@ impl EmaxView {
                 } else {
                     Some(snap)
                 };
-                div().flex_1().min_h_0().overflow_hidden().children(snap.map(|s| term_view::render_terminal(&s, lh))).into_any_element()
+                div().flex_1().min_h_0().overflow_hidden().children(snap.map(|s| term_view::render_terminal(&s, self.cell_w, lh))).into_any_element()
             }
             None => self.render_text(win, &m, gutter_w, cx),
         };
@@ -1169,7 +1188,9 @@ impl Render for EmaxView {
         let (echo_h, tab_bar_h) = (self.echo_height(), self.tab_bar_height());
         let area_w = f32::from(size.width).max(1.0);
         let area_h = (f32::from(size.height) - echo_h - tab_bar_h).max(lh);
-        self.ed.layout.set_frame_size(area_w / term_view::cell_width(fonts.size), area_h / lh);
+        // Terminal grids and window sizes in columns use the font's real advance.
+        self.cell_w = term_view::measure_cell_width(window, fonts.family.clone(), fonts.size);
+        self.ed.layout.set_frame_size(area_w / self.cell_w, area_h / lh);
         let rects = compute_rects(&self.ed.layout.tab().root, Rect { x: 0.0, y: 0.0, w: area_w, h: area_h });
 
         self.prune_scrolls();

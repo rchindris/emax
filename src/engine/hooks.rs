@@ -377,6 +377,19 @@ impl Editor {
         let handled = self.run_hooks();
         output || fired > 0 || handled > 0
     }
+
+    /// The editor is going away by some other route than
+    /// `save-buffers-kill-terminal` (the window closed, the app quit): run
+    /// the `kill-emacs` hooks once, as that command would have. Does nothing
+    /// when the command already did it.
+    pub fn exit(&mut self) {
+        if self.quit_requested {
+            return;
+        }
+        self.quit_requested = true;
+        self.emit(Event::KillEmacs);
+        self.run_hooks();
+    }
 }
 
 #[cfg(test)]
@@ -748,6 +761,24 @@ mod tests {
             ed.run_timers(t0 + ms(step));
         }
         assert_eq!(*runs.borrow(), 2);
+    }
+
+    #[test]
+    fn exit_runs_kill_emacs_hooks_once() {
+        let mut ed = editor();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        ed.hooks.add(EventKind::KillEmacs, "rec", recorder(&log, "k"));
+        ed.exit();
+        ed.exit();
+        assert!(ed.quit_requested);
+        assert_eq!(log.borrow().len(), 1);
+        // After the quit command already ran them, exit adds nothing.
+        let mut ed = editor();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        ed.hooks.add(EventKind::KillEmacs, "rec", recorder(&log, "k"));
+        ed.execute("save-buffers-kill-terminal", Args::default());
+        ed.exit();
+        assert_eq!(log.borrow().len(), 1);
     }
 
     #[test]

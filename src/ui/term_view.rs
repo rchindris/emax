@@ -5,37 +5,23 @@
 //! and every run is placed at its column, so the grid stays aligned whatever
 //! the font does with wide or missing glyphs.
 
-use std::cell::Cell as StdCell;
-
 use gpui::{AnyElement, FontWeight, SharedString, Window, div, font, prelude::*, px, rgba};
 
 use emax::engine::term::{CursorShape, Run, Snapshot};
 
-thread_local! {
-    /// The cell width last computed by `cell_width`/`measure_cell_width`:
-    /// `render_terminal` lays out with the same width `grid_size` used.
-    static CELL_WIDTH: StdCell<Option<f32>> = const { StdCell::new(None) };
-}
-
-fn remember(w: f32) -> f32 {
-    CELL_WIDTH.with(|c| c.set(Some(w)));
-    w
-}
-
 /// Width of a cell for a monospaced font of `font_size` pixels (an
-/// estimate; see [`measure_cell_width`] for the real advance).
+/// estimate, used until the first render measures the real advance).
 pub fn cell_width(font_size: f32) -> f32 {
-    remember((font_size * 0.6).max(1.0))
+    (font_size * 0.6).max(1.0)
 }
 
 /// Width of a cell in `family` at `font_size` pixels: the advance of `m`
 /// as the text system lays it out (falls back to the estimate).
-#[allow(dead_code)] // for the per-window terminal view
 pub fn measure_cell_width(window: &Window, family: impl Into<SharedString>, font_size: f32) -> f32 {
     let ts = window.text_system();
     let id = ts.resolve_font(&font(family));
     match ts.advance(id, px(font_size), 'm') {
-        Ok(size) if f32::from(size.width) >= 1.0 => remember(f32::from(size.width)),
+        Ok(size) if f32::from(size.width) >= 1.0 => f32::from(size.width),
         _ => cell_width(font_size),
     }
 }
@@ -47,15 +33,8 @@ pub fn grid_size(width: f32, height: f32, cell_w: f32, line_h: f32) -> (u16, u16
     (cols, rows)
 }
 
-/// The element showing `snap`, one `line_h`-pixel row per terminal row,
-/// with cells as wide as the last [`cell_width`]/[`measure_cell_width`].
-pub fn render_terminal(snap: &Snapshot, line_h: f32) -> AnyElement {
-    let cell_w = CELL_WIDTH.with(StdCell::get).unwrap_or(line_h * 0.5);
-    render_terminal_with(snap, cell_w, line_h)
-}
-
 /// The element showing `snap` with `cell_w`×`line_h`-pixel cells.
-pub fn render_terminal_with(snap: &Snapshot, cell_w: f32, line_h: f32) -> AnyElement {
+pub fn render_terminal(snap: &Snapshot, cell_w: f32, line_h: f32) -> AnyElement {
     let rows = (0..snap.rows).map(|r| {
         let runs = snap.row_runs(r).into_iter().filter(|run| !run.is_blank(snap.background));
         div()
