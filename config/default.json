@@ -3,6 +3,59 @@
     "fill_column": 70,
     "tab_width": 4
   },
+  "font": {
+    "family": "monospace",
+    "ui_family": "system-ui",
+    "size": 14,
+    "line_height": 1.5
+  },
+  "theme": "emax-dark",
+  "themes": {
+    "emax-dark": {
+      "background": "#1e1f22",
+      "foreground": "#d4d7dd",
+      "emphasis": "#ffffff",
+      "dim": "#5c6370",
+      "accent": "#c678dd",
+      "current_line": "#26282e",
+      "cursor": "#61afef",
+      "secondary_cursor": "#e5c07b",
+      "region": "#3a4458",
+      "search_match": "#3e4a3a",
+      "search_current": "#d19a66",
+      "match_text": "#61afef",
+      "modeline": "#2b2d33",
+      "modeline_preview": "#33304a",
+      "panel": "#25272c",
+      "panel_border": "#3b3f48",
+      "row_selected": "#2f3646",
+      "row_hover": "#2a2d35",
+      "badge": "#353a45",
+      "overlay": "#0b0c0f80"
+    },
+    "emax-light": {
+      "background": "#fafafa",
+      "foreground": "#383a42",
+      "emphasis": "#000000",
+      "dim": "#9da0a8",
+      "accent": "#a626a4",
+      "current_line": "#f0f0f1",
+      "cursor": "#4078f2",
+      "secondary_cursor": "#c18401",
+      "region": "#d7e2fb",
+      "search_match": "#dcefd6",
+      "search_current": "#e08a3c",
+      "match_text": "#4078f2",
+      "modeline": "#e9e9eb",
+      "modeline_preview": "#e6e0f3",
+      "panel": "#f2f2f3",
+      "panel_border": "#d4d5d9",
+      "row_selected": "#dfe6f5",
+      "row_hover": "#e8e9ec",
+      "badge": "#e2e3e7",
+      "overlay": "#00000033"
+    }
+  },
   "keymaps": {
     "global": {
       "C-f": "forward-char",

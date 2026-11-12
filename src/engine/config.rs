@@ -18,6 +18,9 @@
 //! }
 //! ```
 //!
+//! `font`, `theme` and `themes` set the look (see [`super::theme`]); a user
+//! theme entry is merged color by color into the theme of the same name.
+//!
 //! Problems (bad JSON, unknown commands, malformed keys) never stop the
 //! editor: the offending entry is skipped and reported in `warnings`.
 
@@ -30,6 +33,7 @@ use super::buffers::PICKER_ACTIONS;
 use super::commands;
 use super::keymap::{Key, Keymap, PREFIX_ARG_COMMANDS};
 use super::search::SEARCH_ACTIONS;
+use super::theme::{self, DEFAULT_THEME, Fonts, RawThemes, Theme, Themes};
 
 /// The built-in configuration.
 pub const DEFAULT_JSON: &str = include_str!("../../config/default.json");
@@ -41,6 +45,10 @@ pub const KEYMAP_NAMES: [&str; 3] = ["global", "picker", "search"];
 #[serde(default, deny_unknown_fields)]
 struct RawConfig {
     editor: RawEditor,
+    font: RawFont,
+    theme: Option<RawThemeChoice>,
+    /// theme name -> color name (or `inherits`) -> value.
+    themes: RawThemes,
     /// keymap name -> key sequence -> command (`null` unbinds).
     keymaps: BTreeMap<String, BTreeMap<String, Option<String>>>,
 }
@@ -50,6 +58,22 @@ struct RawConfig {
 struct RawEditor {
     fill_column: Option<usize>,
     tab_width: Option<usize>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct RawFont {
+    family: Option<String>,
+    ui_family: Option<String>,
+    size: Option<f32>,
+    line_height: Option<f32>,
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(untagged)]
+enum RawThemeChoice {
+    One(String),
+    ByAppearance { light: String, dark: String },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -80,8 +104,16 @@ impl Keymaps {
     }
 }
 
+/// How the editor looks.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Appearance {
+    pub fonts: Fonts,
+    pub themes: Themes,
+}
+
 pub struct Config {
     pub settings: Settings,
+    pub appearance: Appearance,
     pub keymaps: Keymaps,
     /// The user file that was loaded, if any.
     pub user_file: Option<PathBuf>,
@@ -118,6 +150,10 @@ impl Config {
     pub fn from_layers(layers: &[(&str, &str)]) -> Self {
         let mut warnings = Vec::new();
         let mut settings = Settings::default();
+        let (mut family, mut ui_family) = ("monospace".to_string(), "system-ui".to_string());
+        let (mut size, mut line_height) = (14.0_f32, 1.5_f32);
+        let mut theme_choice = RawThemeChoice::One(DEFAULT_THEME.to_string());
+        let mut raw_themes = RawThemes::new();
         let mut maps: BTreeMap<&'static str, BTreeMap<String, String>> =
             KEYMAP_NAMES.iter().map(|n| (*n, BTreeMap::new())).collect();
 
@@ -136,6 +172,32 @@ impl Config {
                 Some(0) => warnings.push(format!("{label}: editor.tab_width must be at least 1")),
                 Some(v) => settings.tab_width = v,
                 None => {}
+            }
+            let font = raw.font;
+            for (field, value) in [("family", font.family), ("ui_family", font.ui_family)] {
+                match value {
+                    Some(v) if v.trim().is_empty() => warnings.push(format!("{label}: font.{field} is empty")),
+                    Some(v) => *(if field == "family" { &mut family } else { &mut ui_family }) = v,
+                    None => {}
+                }
+            }
+            match font.size {
+                Some(v) if !(4.0..=200.0).contains(&v) => warnings.push(format!("{label}: font.size must be between 4 and 200")),
+                Some(v) => size = v,
+                None => {}
+            }
+            match font.line_height {
+                Some(v) if !(1.0..=4.0).contains(&v) => {
+                    warnings.push(format!("{label}: font.line_height must be between 1 and 4 (a multiple of the size)"))
+                }
+                Some(v) => line_height = v,
+                None => {}
+            }
+            if let Some(t) = raw.theme {
+                theme_choice = t;
+            }
+            for (name, entries) in raw.themes {
+                raw_themes.entry(name).or_default().extend(entries);
             }
             for (name, entries) in raw.keymaps {
                 let Some(map) = KEYMAP_NAMES.iter().find(|n| **n == name).and_then(|n| maps.get_mut(n)) else {
@@ -177,8 +239,33 @@ impl Config {
             picker: build("picker", &|a| PICKER_ACTIONS.iter().find(|x| **x == a).copied(), true),
             search: build("search", &|a| SEARCH_ACTIONS.iter().find(|x| **x == a).copied(), true),
         };
-        Self { settings, keymaps, user_file: None, warnings }
+        let fallback = builtin_default_theme();
+        let mut pick = |name: &str| {
+            theme::resolve(name, &raw_themes, &fallback, &mut warnings).unwrap_or_else(|| {
+                if !raw_themes.contains_key(name) {
+                    let known: Vec<&str> = raw_themes.keys().map(String::as_str).collect();
+                    warnings.push(format!("theme: unknown theme \"{name}\" (known: {})", known.join(", ")));
+                }
+                fallback.clone()
+            })
+        };
+        let themes = match theme_choice {
+            RawThemeChoice::One(n) => {
+                let t = pick(&n);
+                Themes { light: t.clone(), dark: t }
+            }
+            RawThemeChoice::ByAppearance { light, dark } => Themes { light: pick(&light), dark: pick(&dark) },
+        };
+        let appearance = Appearance { fonts: Fonts::new(&family, &ui_family, size, line_height), themes };
+        Self { settings, appearance, keymaps, user_file: None, warnings }
     }
+}
+
+/// The default theme exactly as the built-in configuration defines it: the
+/// base for themes that don't name one to inherit.
+fn builtin_default_theme() -> Theme {
+    let raw: RawConfig = serde_json::from_str(DEFAULT_JSON).expect("built-in config is valid JSON");
+    Theme::complete(&raw.themes[DEFAULT_THEME]).unwrap_or_else(|e| panic!("built-in {DEFAULT_THEME}: {e}"))
 }
 
 fn resolve_global(name: &str) -> Option<&'static str> {
@@ -287,5 +374,74 @@ mod tests {
         let broken = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", "{ not json")]);
         assert!(broken.warnings[0].starts_with("user:"));
         assert_eq!(broken.keymaps.global.lookup(&["C-f".into()]), Some("forward-char"));
+    }
+
+    #[test]
+    fn builtin_appearance() {
+        let a = Config::builtin().appearance;
+        assert_eq!(a.fonts.family, theme::PLATFORM_MONOSPACE);
+        assert_eq!((a.fonts.size, a.fonts.line_height), (14.0, 21.0));
+        assert_eq!(a.themes.dark, builtin_default_theme());
+        assert_eq!(a.themes.dark.background, 0x1e1f22ff);
+        assert_eq!(a.themes.dark.overlay, 0x0b0c0f80);
+        // The built-in light theme is complete on its own.
+        let raw: RawConfig = serde_json::from_str(DEFAULT_JSON).unwrap();
+        for (name, entries) in &raw.themes {
+            Theme::complete(entries).unwrap_or_else(|e| panic!("built-in theme {name}: {e}"));
+        }
+    }
+
+    #[test]
+    fn user_fonts_and_themes() {
+        let user = r##"{
+            "font": { "family": "Iosevka", "size": 16, "line_height": 1.25 },
+            "theme": { "light": "paper", "dark": "emax-dark" },
+            "themes": {
+                "emax-dark": { "cursor": "#ff0000" },
+                "paper": { "inherits": "emax-light", "background": "#fffff0" }
+            }
+        }"##;
+        let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", user)]);
+        assert!(c.warnings.is_empty(), "{:#?}", c.warnings);
+        let a = &c.appearance;
+        assert_eq!((a.fonts.family.as_str(), a.fonts.ui_family.as_str()), ("Iosevka", ".SystemUIFont"));
+        assert_eq!((a.fonts.size, a.fonts.line_height), (16.0, 20.0));
+        // A single color overridden in a built-in theme; the rest kept.
+        assert_eq!(a.themes.dark.cursor, 0xff0000ff);
+        assert_eq!(a.themes.dark.background, 0x1e1f22ff);
+        // A new theme built on the light one.
+        assert_eq!(a.themes.light.background, 0xfffff0ff);
+        assert_eq!(a.themes.light.foreground, 0x383a42ff);
+        assert_ne!(a.themes.get(false).background, a.themes.get(true).background);
+    }
+
+    #[test]
+    fn theme_problems_are_reported_and_skipped() {
+        let user = r##"{
+            "font": { "size": 0, "line_height": 9 },
+            "theme": "mine",
+            "themes": {
+                "mine": { "background": "#123", "foreground": "blue", "sparkle": "#fff" },
+                "a": { "inherits": "b" },
+                "b": { "inherits": "a" }
+            }
+        }"##;
+        let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", user)]);
+        let w = c.warnings.join("\n");
+        assert!(w.contains("font.size"), "{w}");
+        assert!(w.contains("font.line_height"), "{w}");
+        assert!(w.contains("\"blue\" is not a color"), "{w}");
+        assert!(w.contains("unknown color \"sparkle\""), "{w}");
+        assert!(w.contains("no color for foreground"), "{w}");
+        assert_eq!((c.appearance.fonts.size, c.appearance.fonts.line_height), (14.0, 21.0));
+        let t = &c.appearance.themes.dark;
+        assert_eq!(t.background, 0x112233ff);
+        assert_eq!(t.foreground, builtin_default_theme().foreground);
+
+        let cyclic = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", r#"{"theme": "a", "themes": {"a": {"inherits": "b"}, "b": {"inherits": "a"}}}"#)]);
+        assert!(cyclic.warnings.iter().any(|w| w.contains("cycle")), "{:#?}", cyclic.warnings);
+        let unknown = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", r#"{"theme": "nope"}"#)]);
+        assert!(unknown.warnings.iter().any(|w| w.contains("unknown theme \"nope\"")), "{:#?}", unknown.warnings);
+        assert_eq!(unknown.appearance.themes.dark, builtin_default_theme());
     }
 }

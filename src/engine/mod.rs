@@ -10,13 +10,15 @@ pub mod keymap;
 pub mod picker;
 pub mod search;
 pub mod text;
+pub mod theme;
 
 #[cfg(test)]
 mod tests;
 
 pub use buffer::Buffer;
 pub use buffers::BufView;
-pub use config::{Config, Keymaps, Settings};
+pub use config::{Appearance, Config, Keymaps, Settings};
+pub use theme::{Fonts, Theme, Themes};
 pub use editor::{Args, Editor, RawArg, Scroll};
 pub use keymap::{Dispatcher, Key, Keymap, Outcome};
 pub use search::{Swiper, SwiperExit};

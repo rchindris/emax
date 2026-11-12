@@ -12,36 +12,15 @@ use std::time::Instant;
 use gpui::{
     AnyElement, App, ClipboardItem, Context, FocusHandle, Focusable, FontWeight, HighlightStyle, KeyDownEvent,
     Keystroke, Pixels, Point, SharedString, StyledText, UniformListScrollHandle, Window, div,
-    point, prelude::*, px, rgb, rgba, uniform_list,
+    point, prelude::*, px, rgba, uniform_list,
 };
 
 use emax::engine::picker::Picker;
 use emax::engine::{Swiper, SwiperExit};
-use emax::engine::{BufView, Dispatcher, Editor, Key, Keymap, Keymaps, Outcome, Scroll, text};
+use emax::engine::{Appearance, BufView, Dispatcher, Editor, Key, Keymap, Keymaps, Outcome, Scroll, Theme, text};
 
-// ------------------------------------------------------------------ theme
+// ------------------------------------------------------------------ layout
 
-const BG: u32 = 0x1e1f22;
-const FG: u32 = 0xd4d7dd;
-const DIM: u32 = 0x5c6370;
-const CUR_LINE: u32 = 0x26282e;
-const CURSOR: u32 = 0x61afef;
-const CURSOR2: u32 = 0xe5c07b;
-const REGION: u32 = 0x3a4458;
-const MODELINE_BG: u32 = 0x2b2d33;
-const ACCENT: u32 = 0xc678dd;
-const PANEL_BG: u32 = 0x25272c;
-const PANEL_BORDER: u32 = 0x3b3f48;
-const ROW_SELECTED: u32 = 0x2f3646;
-const ROW_HOVER: u32 = 0x2a2d35;
-const MATCH: u32 = 0x61afef;
-/// Search matches in the buffer, and the selected one.
-const SEARCH_HL: u32 = 0x3e4a3a;
-const SEARCH_CUR: u32 = 0xd19a66;
-const FONT: &str = "Menlo";
-const UI_FONT: &str = ".SystemUIFont";
-const FONT_SIZE: f32 = 14.0;
-const LINE_HEIGHT: f32 = 21.0;
 /// Lines longer than this are truncated on screen (prototype limitation).
 const MAX_RENDER_COLS: usize = 2000;
 const PICKER_ROWS: usize = 12;
@@ -49,8 +28,6 @@ const PICKER_ROWS: usize = 12;
 const SWIPER_ROWS: usize = 10;
 /// Search panel candidates longer than this are cut off.
 const SWIPER_COLS: usize = 400;
-/// Height of the search panel: the query line, the rows, and two 1px borders.
-const SWIPER_PANEL_H: f32 = (SWIPER_ROWS as f32 + 1.0) * LINE_HEIGHT + 2.0;
 
 pub struct EmaxView {
     ed: Editor,
@@ -70,11 +47,20 @@ pub struct EmaxView {
     rows_us: Rc<Cell<u128>>,
     /// Scroll offset when the search opened, restored if it is cancelled.
     swiper_scroll: Option<Point<Pixels>>,
+    appearance: Appearance,
+    /// Whether the window has a dark appearance (picks the dark theme).
+    dark: bool,
 }
 
 impl EmaxView {
-    pub fn new(ed: Editor, keymaps: Keymaps, cx: &mut Context<Self>) -> Self {
+    pub fn new(ed: Editor, keymaps: Keymaps, appearance: Appearance, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let echo = ed.message.clone().map(SharedString::from);
+        // Follow the system's light/dark switch while running.
+        cx.observe_window_appearance(window, |this, window, cx| {
+            this.dark = is_dark(window.appearance());
+            cx.notify();
+        })
+        .detach();
         Self {
             ed,
             keys: Dispatcher::new(keymaps.global),
@@ -88,7 +74,22 @@ impl EmaxView {
             last_latency_us: 0,
             rows_us: Rc::new(Cell::new(0)),
             swiper_scroll: None,
+            appearance,
+            dark: is_dark(window.appearance()),
         }
+    }
+
+    fn theme(&self) -> &Theme {
+        self.appearance.themes.get(self.dark)
+    }
+
+    fn line_height(&self) -> f32 {
+        self.appearance.fonts.line_height
+    }
+
+    /// Height of the search panel: the query line, the rows, and two 1px borders.
+    fn swiper_panel_height(&self) -> f32 {
+        (SWIPER_ROWS as f32 + 1.0) * self.line_height() + 2.0
     }
 
     fn scroll_for(&mut self, id: u64) -> UniformListScrollHandle {
@@ -186,17 +187,18 @@ impl EmaxView {
     /// the previous one set. The height comes from the last layout, corrected
     /// when the search panel has opened or closed since.
     fn viewport(&mut self) -> (f32, f32, usize) {
+        let (lh, panel_h) = (self.line_height(), self.swiper_panel_height());
         let handle = self.scroll_for(self.ed.buf_id);
         let state = handle.0.borrow();
         let top = -f32::from(state.base_handle.offset().y);
-        let mut h = state.last_item_size.map_or(30.0 * LINE_HEIGHT, |s| f32::from(s.item.height));
+        let mut h = state.last_item_size.map_or(30.0 * lh, |s| f32::from(s.item.height));
         match (self.panel_at_layout, self.ed.swiper.is_some()) {
-            (false, true) => h -= SWIPER_PANEL_H,
-            (true, false) => h += SWIPER_PANEL_H,
+            (false, true) => h -= panel_h,
+            (true, false) => h += panel_h,
             _ => {}
         }
-        let h = h.max(LINE_HEIGHT);
-        (top.max(0.0), h, ((h / LINE_HEIGHT).floor() as usize).max(1))
+        let h = h.max(lh);
+        (top.max(0.0), h, ((h / lh).floor() as usize).max(1))
     }
 
     /// Scroll the current buffer as the last command asked (`Editor.scroll`),
@@ -206,13 +208,14 @@ impl EmaxView {
             return;
         }
         let (top, h, rows) = self.viewport();
+        let lh = self.line_height();
         let r = self.ed.rope();
         let target = self.ed.reveal.unwrap_or(self.ed.primary_cursor().point);
         let line = r.char_to_line(target.min(r.len_chars()));
-        let max_top = (r.len_lines() as f32 * LINE_HEIGHT - h).max(0.0);
-        let line_top = line as f32 * LINE_HEIGHT;
-        let line_bottom = line_top + LINE_HEIGHT;
-        let center = line_top + LINE_HEIGHT / 2.0 - h / 2.0;
+        let max_top = (r.len_lines() as f32 * lh - h).max(0.0);
+        let line_top = line as f32 * lh;
+        let line_bottom = line_top + lh;
+        let center = line_top + lh / 2.0 - h / 2.0;
         let new_top = match self.ed.scroll {
             Scroll::Keep => return,
             Scroll::EnsureVisible => {
@@ -228,7 +231,7 @@ impl EmaxView {
             Scroll::Center => center,
             Scroll::Top => line_top,
             Scroll::Bottom => line_bottom - h,
-            Scroll::Page(dir) => top + dir as f32 * rows.saturating_sub(2).max(1) as f32 * LINE_HEIGHT,
+            Scroll::Page(dir) => top + dir as f32 * rows.saturating_sub(2).max(1) as f32 * lh,
         };
         let handle = self.scroll_for(self.ed.buf_id);
         let state = handle.0.borrow();
@@ -237,6 +240,7 @@ impl EmaxView {
     }
 
     fn render_picker(&self, p: &Picker, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.theme();
         let n = p.matches.len();
         let start = (p.selected + 1).saturating_sub(PICKER_ROWS);
         let rows: Vec<_> = p
@@ -257,8 +261,8 @@ impl EmaxView {
                     .h(px(32.0))
                     .rounded_md()
                     .cursor_pointer()
-                    .when(selected, |d| d.bg(rgb(ROW_SELECTED)))
-                    .when(!selected, |d| d.hover(|s| s.bg(rgb(ROW_HOVER))))
+                    .when(selected, |d| d.bg(rgba(t.row_selected)))
+                    .when(!selected, |d| d.hover(|s| s.bg(rgba(t.row_hover))))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.ed.picker_accept(i);
                         this.after_picker();
@@ -269,24 +273,24 @@ impl EmaxView {
                             .w(px(3.0))
                             .h(px(16.0))
                             .rounded_sm()
-                            .when(selected, |d| d.bg(rgb(CURSOR))),
+                            .when(selected, |d| d.bg(rgba(t.cursor))),
                     )
-                    .child(div().w(px(10.0)).text_color(rgb(CURSOR2)).child(if c.modified { "●" } else { "" }))
+                    .child(div().w(px(10.0)).text_color(rgba(t.secondary_cursor)).child(if c.modified { "●" } else { "" }))
                     .child(
                         div()
                             .flex_none()
-                            .text_color(rgb(if selected { 0xffffff } else { FG }))
+                            .text_color(rgba(if selected { t.emphasis } else { t.foreground }))
                             .when(selected, |d| d.font_weight(FontWeight::SEMIBOLD))
-                            .child(highlighted(&c.label, &m.positions)),
+                            .child(highlighted(&c.label, &m.positions, t)),
                     )
                     .when(c.current, |d| {
                         d.child(
                             div()
                                 .px_1p5()
                                 .rounded_sm()
-                                .bg(rgb(0x353a45))
+                                .bg(rgba(t.badge))
                                 .text_size(px(11.0))
-                                .text_color(rgb(DIM))
+                                .text_color(rgba(t.dim))
                                 .child("current"),
                         )
                     })
@@ -298,10 +302,10 @@ impl EmaxView {
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .text_size(px(12.5))
-                            .text_color(rgb(DIM))
+                            .text_color(rgba(t.dim))
                             .child(c.detail.clone()),
                     )
-                    .child(div().flex_none().text_size(px(12.0)).text_color(rgb(DIM)).child(c.annotation.clone()))
+                    .child(div().flex_none().text_size(px(12.0)).text_color(rgba(t.dim)).child(c.annotation.clone()))
             })
             .collect();
 
@@ -330,13 +334,13 @@ impl EmaxView {
             .max_w_full()
             .flex()
             .flex_col()
-            .bg(rgb(PANEL_BG))
+            .bg(rgba(t.panel))
             .border_1()
-            .border_color(rgb(PANEL_BORDER))
+            .border_color(rgba(t.panel_border))
             .rounded_xl()
             .shadow_2xl()
             .overflow_hidden()
-            .font_family(UI_FONT)
+            .font_family(self.appearance.fonts.ui_family.clone())
             .text_size(px(14.0))
             .child(
                 div()
@@ -346,7 +350,7 @@ impl EmaxView {
                     .px_4()
                     .pt_3()
                     .text_size(px(11.5))
-                    .text_color(rgb(DIM))
+                    .text_color(rgba(t.dim))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(p.prompt.to_uppercase()))
                     .child(div().flex_1())
                     .child(format!("{n} / {}", p.candidates.len())),
@@ -359,12 +363,12 @@ impl EmaxView {
                     .px_4()
                     .py_2p5()
                     .border_b_1()
-                    .border_color(rgb(PANEL_BORDER))
+                    .border_color(rgba(t.panel_border))
                     .text_size(px(16.0))
-                    .child(div().text_color(rgb(ACCENT)).child("❯"))
-                    .child(query_with_caret(&query, px(18.0)))
+                    .child(div().text_color(rgba(t.accent)).child("❯"))
+                    .child(query_with_caret(&query, px(18.0), t))
                     .when(query.is_empty(), |d| {
-                        d.child(div().text_color(rgb(DIM)).child("Type to filter buffers…"))
+                        d.child(div().text_color(rgba(t.dim)).child("Type to filter buffers…"))
                     }),
             )
             .child(
@@ -379,7 +383,7 @@ impl EmaxView {
                             div()
                                 .px_3()
                                 .py_4()
-                                .text_color(rgb(DIM))
+                                .text_color(rgba(t.dim))
                                 .child(if p.query.trim().is_empty() { "No buffers".to_string() } else { "No matching buffer".to_string() }),
                         )
                     }),
@@ -390,17 +394,17 @@ impl EmaxView {
                     .px_4()
                     .py_2()
                     .border_t_1()
-                    .border_color(rgb(PANEL_BORDER))
+                    .border_color(rgba(t.panel_border))
                     .text_size(px(12.0))
-                    .text_color(rgb(DIM))
+                    .text_color(rgba(t.dim))
                     .child(div().flex_1().child(footer_hint))
-                    .when_some(p.message.clone(), |d, m| d.child(div().text_color(rgb(CURSOR2)).child(m))),
+                    .when_some(p.message.clone(), |d, m| d.child(div().text_color(rgba(t.secondary_cursor)).child(m))),
             );
 
         div()
             .absolute()
             .inset_0()
-            .bg(rgba(0x0b0c0f80))
+            .bg(rgba(t.overlay))
             .flex()
             .justify_center()
             .items_start()
@@ -415,6 +419,7 @@ impl EmaxView {
     /// The search panel, docked under the buffer like Emacs' minibuffer: the
     /// query line, then a window of matching lines around the selection.
     fn render_swiper(&self, s: &Swiper, gutter_w: gpui::Pixels, cx: &mut Context<Self>) -> AnyElement {
+        let (t, lh) = (self.theme(), self.line_height());
         let n = s.matches.len();
         let start = s.selected.saturating_sub(SWIPER_ROWS / 2).min(n.saturating_sub(SWIPER_ROWS));
         let mut rows: Vec<AnyElement> = s
@@ -432,18 +437,18 @@ impl EmaxView {
                 div()
                     .id(("swipe", i))
                     .flex()
-                    .h(px(LINE_HEIGHT))
+                    .h(px(lh))
                     .whitespace_nowrap()
                     .overflow_hidden()
                     .cursor_pointer()
-                    .when(selected, |d| d.bg(rgb(ROW_SELECTED)))
-                    .when(!selected, |d| d.hover(|st| st.bg(rgb(ROW_HOVER))))
+                    .when(selected, |d| d.bg(rgba(t.row_selected)))
+                    .when(!selected, |d| d.hover(|st| st.bg(rgba(t.row_hover))))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let exit = this.ed.swiper_accept_index(i);
                         this.after_swiper(exit);
                         cx.notify();
                     }))
-                    .child(div().w(px(3.0)).flex_none().when(selected, |d| d.bg(rgb(CURSOR))))
+                    .child(div().w(px(3.0)).flex_none().when(selected, |d| d.bg(rgba(t.cursor))))
                     .child(
                         div()
                             .w(gutter_w - px(3.0))
@@ -451,13 +456,13 @@ impl EmaxView {
                             .pr_3()
                             .flex()
                             .justify_end()
-                            .text_color(rgb(if selected { FG } else { DIM }))
+                            .text_color(rgba(if selected { t.foreground } else { t.dim }))
                             .child(format!("{}", line + 1)),
                     )
                     .child(
                         div()
-                            .text_color(rgb(if selected { 0xffffff } else { FG }))
-                            .child(highlighted(&text, &positions)),
+                            .text_color(rgba(if selected { t.emphasis } else { t.foreground }))
+                            .child(highlighted(&text, &positions, t)),
                     )
                     .into_any_element()
             })
@@ -465,16 +470,16 @@ impl EmaxView {
         if n == 0 {
             rows.push(
                 div()
-                    .h(px(LINE_HEIGHT))
+                    .h(px(lh))
                     .pl(gutter_w)
-                    .text_color(rgb(DIM))
+                    .text_color(rgba(t.dim))
                     .child(if s.has_terms() { "No match" } else { "Empty buffer" })
                     .into_any_element(),
             );
         }
         // Pad so the panel keeps a fixed height while the list shrinks.
         while rows.len() < SWIPER_ROWS {
-            rows.push(div().h(px(LINE_HEIGHT)).into_any_element());
+            rows.push(div().h(px(lh)).into_any_element());
         }
 
         let query: SharedString = s.query.clone().into();
@@ -483,21 +488,21 @@ impl EmaxView {
             .flex()
             .items_center()
             .gap_2()
-            .h(px(LINE_HEIGHT))
+            .h(px(lh))
             .px_3()
             .border_b_1()
-            .border_color(rgb(PANEL_BORDER))
-            .child(div().text_color(rgb(ACCENT)).font_weight(FontWeight::SEMIBOLD).child(if s.backward { "Swiper ↑" } else { "Swiper" }))
-            .child(div().text_color(rgb(DIM)).child(count))
-            .child(div().text_color(rgb(ACCENT)).child("❯"))
-            .child(query_with_caret(&query, px(16.0)))
-            .when(query.is_empty(), |d| d.child(div().text_color(rgb(DIM)).child("Search…  (space separates terms)")))
+            .border_color(rgba(t.panel_border))
+            .child(div().text_color(rgba(t.accent)).font_weight(FontWeight::SEMIBOLD).child(if s.backward { "Swiper ↑" } else { "Swiper" }))
+            .child(div().text_color(rgba(t.dim)).child(count))
+            .child(div().text_color(rgba(t.accent)).child("❯"))
+            .child(query_with_caret(&query, px(16.0), t))
+            .when(query.is_empty(), |d| d.child(div().text_color(rgba(t.dim)).child("Search…  (space separates terms)")))
             .child(div().flex_1())
             .child(
                 div()
-                    .font_family(UI_FONT)
+                    .font_family(self.appearance.fonts.ui_family.clone())
                     .text_size(px(12.0))
-                    .text_color(rgb(DIM))
+                    .text_color(rgba(t.dim))
                     .child(hints(
                         &self.search_keys,
                         &[
@@ -516,9 +521,9 @@ impl EmaxView {
             .flex_none()
             .flex()
             .flex_col()
-            .bg(rgb(PANEL_BG))
+            .bg(rgba(t.panel))
             .border_t_1()
-            .border_color(rgb(PANEL_BORDER))
+            .border_color(rgba(t.panel_border))
             .child(input)
             .children(rows)
             .into_any_element()
@@ -527,12 +532,12 @@ impl EmaxView {
 
 /// The typed query followed directly by the caret. Spaces are shown as
 /// non-breaking spaces so a trailing space still moves the caret.
-fn query_with_caret(query: &str, caret_h: gpui::Pixels) -> impl IntoElement {
+fn query_with_caret(query: &str, caret_h: gpui::Pixels, t: &Theme) -> impl IntoElement {
     div()
         .flex()
         .items_center()
-        .when(!query.is_empty(), |d| d.child(div().text_color(rgb(0xffffff)).child(query.replace(' ', "\u{a0}"))))
-        .child(div().w(px(2.0)).h(caret_h).bg(rgb(CURSOR)))
+        .when(!query.is_empty(), |d| d.child(div().text_color(rgba(t.emphasis)).child(query.replace(' ', "\u{a0}"))))
+        .child(div().w(px(2.0)).h(caret_h).bg(rgba(t.cursor)))
 }
 
 /// Footer hints like "RET jump    C-s next", using the keys currently bound to
@@ -549,8 +554,8 @@ fn hints(keymap: &Keymap, items: &[(&str, &str)]) -> String {
 }
 
 /// A label with the fuzzy-matched characters highlighted.
-fn highlighted(label: &str, positions: &[usize]) -> StyledText {
-    let style = HighlightStyle { color: Some(rgb(MATCH).into()), font_weight: Some(FontWeight::BOLD), ..Default::default() };
+fn highlighted(label: &str, positions: &[usize], t: &Theme) -> StyledText {
+    let style = HighlightStyle { color: Some(rgba(t.match_text).into()), font_weight: Some(FontWeight::BOLD), ..Default::default() };
     let mut ranges: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
     let offsets: Vec<(usize, char)> = label.char_indices().collect();
     for &p in positions {
@@ -595,6 +600,10 @@ fn to_key(ks: &Keystroke) -> Key {
     Key { ctrl: m.control, meta: m.alt, shift, sup: m.platform, name, text }
 }
 
+fn is_dark(a: gpui::WindowAppearance) -> bool {
+    matches!(a, gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark)
+}
+
 fn shifted(c: char) -> char {
     const PAIRS: &[(char, char)] = &[
         ('1', '!'), ('2', '@'), ('3', '#'), ('4', '$'), ('5', '%'), ('6', '^'), ('7', '&'),
@@ -618,7 +627,15 @@ enum CellKind {
 
 /// Build the styled text for one line: tabs expanded; search matches (char
 /// columns, `current` for the selected one), region and cursor cells highlighted.
-fn render_line(v: &BufView, line: usize, tab_width: usize, show_cursors: bool, matches: &[Range<usize>], current: bool) -> StyledText {
+fn render_line(
+    v: &BufView,
+    line: usize,
+    tab_width: usize,
+    show_cursors: bool,
+    matches: &[Range<usize>],
+    current: bool,
+    t: &Theme,
+) -> StyledText {
     let r = &v.buf.rope;
     let start = r.line_to_char(line);
     let len = text::line_len(r, line);
@@ -666,21 +683,21 @@ fn render_line(v: &BufView, line: usize, tab_width: usize, show_cursors: bool, m
 
     let style = |k: CellKind| match k {
         CellKind::Plain => None,
-        CellKind::Match => Some(HighlightStyle { background_color: Some(rgb(SEARCH_HL).into()), ..Default::default() }),
+        CellKind::Match => Some(HighlightStyle { background_color: Some(rgba(t.search_match).into()), ..Default::default() }),
         CellKind::CurrentMatch => Some(HighlightStyle {
-            background_color: Some(rgb(SEARCH_CUR).into()),
-            color: Some(rgb(BG).into()),
+            background_color: Some(rgba(t.search_current).into()),
+            color: Some(rgba(t.background).into()),
             ..Default::default()
         }),
-        CellKind::Region => Some(HighlightStyle { background_color: Some(rgb(REGION).into()), ..Default::default() }),
+        CellKind::Region => Some(HighlightStyle { background_color: Some(rgba(t.region).into()), ..Default::default() }),
         CellKind::Cursor => Some(HighlightStyle {
-            background_color: Some(rgb(CURSOR).into()),
-            color: Some(rgb(BG).into()),
+            background_color: Some(rgba(t.cursor).into()),
+            color: Some(rgba(t.background).into()),
             ..Default::default()
         }),
         CellKind::Cursor2 => Some(HighlightStyle {
-            background_color: Some(rgb(CURSOR2).into()),
-            color: Some(rgb(BG).into()),
+            background_color: Some(rgba(t.secondary_cursor).into()),
+            color: Some(rgba(t.background).into()),
             ..Default::default()
         }),
     };
@@ -731,7 +748,10 @@ impl Render for EmaxView {
                 v.id != self.ed.buf_id,
             )
         };
-        let gutter_w = px(((total.to_string().len().max(3) + 2) as f32) * FONT_SIZE * 0.62);
+        let t = self.theme().clone();
+        let fonts = self.appearance.fonts.clone();
+        let lh = fonts.line_height;
+        let gutter_w = px(((total.to_string().len().max(3) + 2) as f32) * fonts.size * 0.62);
         let rows_us = self.rows_us.clone();
         self.panel_at_layout = self.ed.swiper.is_some();
         let scroll = self.scroll_for(view_id);
@@ -740,7 +760,8 @@ impl Render for EmaxView {
             "buffer",
             total,
             cx.processor(move |this: &mut EmaxView, range: Range<usize>, _w, _cx| {
-                let t = Instant::now();
+                let started = Instant::now();
+                let t = this.appearance.themes.get(this.dark);
                 let v = this.ed.display_view();
                 let search = this.ed.swiper.as_ref();
                 let selected_match = search.and_then(|s| s.selected_line());
@@ -751,10 +772,10 @@ impl Render for EmaxView {
                             .id(ix)
                             .flex()
                             .w_full()
-                            .h(px(LINE_HEIGHT))
+                            .h(px(lh))
                             .whitespace_nowrap()
                             .overflow_hidden()
-                            .when(is_cur, |d| d.bg(rgb(CUR_LINE)))
+                            .when(is_cur, |d| d.bg(rgba(t.current_line)))
                             .child(
                                 div()
                                     .w(gutter_w)
@@ -762,16 +783,16 @@ impl Render for EmaxView {
                                     .pr_3()
                                     .flex()
                                     .justify_end()
-                                    .text_color(rgb(if is_cur { FG } else { DIM }))
+                                    .text_color(rgba(if is_cur { t.foreground } else { t.dim }))
                                     .child(format!("{}", ix + 1)),
                             )
                             .child({
                                 let hl = search.map(|s| s.highlights(ix)).unwrap_or_default();
-                                render_line(&v, ix, this.ed.tab_width, true, &hl, selected_match == Some(ix))
+                                render_line(&v, ix, this.ed.tab_width, true, &hl, selected_match == Some(ix), t)
                             })
                     })
                     .collect();
-                rows_us.set(t.elapsed().as_micros());
+                rows_us.set(started.elapsed().as_micros());
                 rows
             }),
         )
@@ -783,22 +804,22 @@ impl Render for EmaxView {
             .gap_4()
             .px_3()
             .py_1()
-            .bg(rgb(if previewing { 0x33304a } else { MODELINE_BG }))
-            .text_color(rgb(FG))
-            .child(div().text_color(rgb(ACCENT)).child(if modified { "●" } else { "○" }))
+            .bg(rgba(if previewing { t.modeline_preview } else { t.modeline }))
+            .text_color(rgba(t.foreground))
+            .child(div().text_color(rgba(t.accent)).child(if modified { "●" } else { "○" }))
             .child(div().font_weight(FontWeight::BOLD).child(view_name))
-            .when(previewing, |d| d.child(div().text_color(rgb(ACCENT)).child("preview")))
+            .when(previewing, |d| d.child(div().text_color(rgba(t.accent)).child("preview")))
             .child(format!("L{} C{}", cur_line + 1, cur_col))
             .when(cursor_count > 1, |d| {
-                d.child(div().text_color(rgb(CURSOR2)).child(format!("{cursor_count} cursors")))
+                d.child(div().text_color(rgba(t.secondary_cursor)).child(format!("{cursor_count} cursors")))
             })
-            .when(region_len > 0, |d| d.child(div().text_color(rgb(CURSOR)).child(format!("{region_len} selected"))))
+            .when(region_len > 0, |d| d.child(div().text_color(rgba(t.cursor)).child(format!("{region_len} selected"))))
             .child(format!("{total} lines"))
             .when(self.ed.buffer_count() > 1, |d| {
-                d.child(div().text_color(rgb(DIM)).child(format!("{} buffers", self.ed.buffer_count())))
+                d.child(div().text_color(rgba(t.dim)).child(format!("{} buffers", self.ed.buffer_count())))
             })
             .child(div().flex_1())
-            .child(div().text_color(rgb(DIM)).child(format!(
+            .child(div().text_color(rgba(t.dim)).child(format!(
                 "key→view {} µs · rows {} µs · view {} µs",
                 self.last_latency_us,
                 self.rows_us.get(),
@@ -806,11 +827,11 @@ impl Render for EmaxView {
             )));
 
         let echo = div()
-            .h(px(LINE_HEIGHT + 6.0))
+            .h(px(lh + 6.0))
             .px_3()
             .flex()
             .items_center()
-            .text_color(rgb(FG))
+            .text_color(rgba(t.foreground))
             .child(self.echo.clone().unwrap_or_default());
 
         let picker = self.ed.picker.as_ref().map(|p| self.render_picker(p, cx));
@@ -823,11 +844,11 @@ impl Render for EmaxView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(BG))
-            .text_color(rgb(FG))
-            .font_family(FONT)
-            .text_size(px(FONT_SIZE))
-            .line_height(px(LINE_HEIGHT))
+            .bg(rgba(t.background))
+            .text_color(rgba(t.foreground))
+            .font_family(fonts.family)
+            .text_size(px(fonts.size))
+            .line_height(px(lh))
             .child(list)
             .children(search)
             .child(modeline)

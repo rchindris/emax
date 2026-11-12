@@ -82,13 +82,14 @@ fn main() {
         [w, rest @ ..] => format!("Config problem (entry skipped): {w} — and {} more, see stderr", rest.len()),
     });
     let keymaps = config.keymaps;
+    let appearance = config.appearance;
 
     Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1100.0), px(760.0)), cx);
         let window = cx
             .open_window(
                 WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() },
-                |_, cx| cx.new(|cx| ui::EmaxView::new(ed, keymaps, cx)),
+                |window, cx| cx.new(|cx| ui::EmaxView::new(ed, keymaps, appearance, window, cx)),
             )
             .unwrap();
         window

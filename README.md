@@ -98,6 +98,12 @@ same keys. Setting an entry to `null` removes a default binding:
 | --- | --- |
 | `editor.fill_column` | Column for `fill-paragraph` (default 70) |
 | `editor.tab_width` | Display width of a tab and the indent step (default 4) |
+| `font.family` | Font for buffer text (default `"monospace"`: Menlo on macOS, Consolas on Windows, DejaVu Sans Mono on Linux) |
+| `font.ui_family` | Font for the buffer picker and panel hints (default `"system-ui"`, the platform's UI font) |
+| `font.size` | Buffer text size in pixels (default 14) |
+| `font.line_height` | Line height as a multiple of the size (default 1.5) |
+| `theme` | The theme to use (default `"emax-dark"`), or `{ "light": …, "dark": … }` to follow the system appearance |
+| `themes` | Theme definitions; see [Themes](#themes) |
 | `keymaps.global` | Editing keys; multi-key sequences like `"C-x C-s"` work. Values are command names (`forward-char`, `swiper`, …) |
 | `keymaps.picker` | Keys while the buffer picker is open; values are `picker-*` actions |
 | `keymaps.search` | Keys while the search panel is open; values are `search-*` actions |
@@ -108,6 +114,29 @@ Super (Cmd), and names like `RET`, `TAB`, `DEL`, `ESC`, `SPC`, `<left>`,
 stop the editor. That entry (or file) is skipped, and the problem shows in the
 echo area and on stderr.
 
+### Themes
+
+emax comes with `emax-dark` and `emax-light`. A theme is a set of colors
+written as `#rrggbb` or `#rrggbbaa`. `emax --print-default-config` lists every
+color name with its value in both built-in themes.
+
+To change a few colors of a built-in theme, set just those colors under its
+name. To make a new theme, give it a name and let it `inherit` an existing one
+so you only list what differs:
+
+```json
+{
+  "theme": { "light": "paper", "dark": "emax-dark" },
+  "themes": {
+    "emax-dark": { "cursor": "#ff6c6b" },
+    "paper": { "inherits": "emax-light", "background": "#fdf6e3", "current_line": "#f5eedc" }
+  }
+}
+```
+
+A theme that doesn't `inherit` should define every color. Any color it leaves
+out is taken from `emax-dark`, and the echo area warns about it.
+
 ## Project layout
 
 ```
@@ -117,6 +146,7 @@ src/
   main.rs            app entry point: opens the file or *scratch* buffer and the window
   ui.rs              GPUI view: rendering and platform-key to Emacs-key translation
   engine/            the editing engine, with no GUI dependencies
+    theme.rs         themes, colors and fonts
     buffer.rs        rope, file association, undo/redo history
     buffers.rs       multiple buffers in most-recently-used order
     cursor.rs        point, mark and mark ring for each cursor
