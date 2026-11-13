@@ -22,9 +22,16 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 streaming-iterator = "0.1"
 tree-sitter = "0.26"
+tree-sitter-bash = "0.25.1"
+tree-sitter-elisp = "1.7.2"
 tree-sitter-json = "0.24"
 tree-sitter-language = "0.1.7"
+tree-sitter-md = "0.5.4"
+tree-sitter-python = "0.25.0"
 tree-sitter-rust = "0.24"
+tree-sitter-scheme = "0.25.0"
+tree-sitter-toml-ng = "0.7.0"
+tree-sitter-yaml = "0.7.2"
 
 # Optimise dependencies (GPUI, ropey) even in debug builds so `cargo run` stays snappy;
 # our own crate keeps fast incremental compiles and full debug info.

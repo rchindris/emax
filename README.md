@@ -14,7 +14,9 @@ without the Emacs runtime.
 - **GPU-rendered UI.** Lines are virtualised, so large files stay responsive.
   The window has a mode line and an echo area.
 - **Rope-backed buffers** with grouped undo/redo.
-- **Syntax highlighting** with tree-sitter (Rust and JSON so far). Edits
+- **Syntax highlighting** with tree-sitter: Rust, Python, shell, JSON, TOML,
+  YAML, Markdown, Scheme and Emacs Lisp. Code embedded in Markdown (fenced
+  blocks, inline formatting) is highlighted in its own language. Edits
   re-parse incrementally, and only the lines on screen are highlighted.
 - **Emacs key bindings.** Prefix keys (`C-x …`), prefix arguments (`C-u`,
   `C-u 12`, `M-5`, `M--`), shift-selection and transient mark.
