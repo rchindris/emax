@@ -55,7 +55,7 @@ On Debian and Ubuntu, download the `.deb` for your architecture from the
 ymacs needs a recent stable Rust toolchain (Rust 1.88 or newer).
 
 ```sh
-cargo run --release               # opens a *scratch* buffer with a key cheat sheet
+cargo run --release               # opens an empty *scratch* buffer
 cargo run --release -- path/file  # opens a file
 ```
 
