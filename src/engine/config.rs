@@ -3,10 +3,10 @@
 //! The built-in defaults live in `config/default.json` (compiled into the
 //! binary). A user file, if present, is layered on top of them:
 //!
-//! - `$EMAX_CONFIG`, or
-//! - `$XDG_CONFIG_HOME/emax/config.json`, or
-//! - on Windows, `%APPDATA%\emax\config.json`, or
-//! - `~/.config/emax/config.json`.
+//! - `$YMACS_CONFIG`, or
+//! - `$XDG_CONFIG_HOME/ymacs/config.json`, or
+//! - on Windows, `%APPDATA%\ymacs\config.json`, or
+//! - `~/.config/ymacs/config.json`.
 //!
 //! The user file only needs what it changes. Settings replace the defaults;
 //! keymap entries are added to the default keymaps, replacing a binding for
@@ -214,7 +214,7 @@ pub struct TerminalConfig {
     pub backend: PtyBackendKind,
     /// Output the daemon keeps per session to replay on attach, in bytes.
     pub replay_bytes: usize,
-    /// The daemon's socket (`$EMAX_PTYD_SOCKET` overrides it; `None`: `session::default_socket_path`).
+    /// The daemon's socket (`$YMACS_PTYD_SOCKET` overrides it; `None`: `session::default_socket_path`).
     pub socket: Option<PathBuf>,
     /// A daemon the editor starts exits after this long with no sessions
     /// and no editor connected (`None`: never; `0` in the file).
@@ -809,13 +809,13 @@ pub fn user_config_path() -> Option<PathBuf> {
 
 fn user_config_path_in(env: &dyn Fn(&str) -> Option<std::ffi::OsString>, windows: bool) -> Option<PathBuf> {
     let var = |name: &str| env(name).filter(|p| !p.is_empty()).map(PathBuf::from);
-    if let Some(p) = var("EMAX_CONFIG") {
+    if let Some(p) = var("YMACS_CONFIG") {
         return Some(p);
     }
     let base = var("XDG_CONFIG_HOME")
         .or_else(|| if windows { var("APPDATA") } else { None })
         .or_else(|| var("HOME").map(|h| h.join(".config")))?;
-    Some(base.join("emax").join("config.json"))
+    Some(base.join("ymacs").join("config.json"))
 }
 
 #[cfg(test)]
@@ -975,10 +975,10 @@ mod tests {
     fn user_fonts_and_themes() {
         let user = r##"{
             "font": { "family": "Iosevka", "size": 16, "line_height": 1.25 },
-            "theme": { "light": "paper", "dark": "emax-dark" },
+            "theme": { "light": "paper", "dark": "ymacs-dark" },
             "themes": {
-                "emax-dark": { "cursor": "#ff0000" },
-                "paper": { "inherits": "emax-light", "background": "#fffff0" }
+                "ymacs-dark": { "cursor": "#ff0000" },
+                "paper": { "inherits": "ymacs-light", "background": "#fffff0" }
             }
         }"##;
         let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", user)]);
@@ -997,16 +997,16 @@ mod tests {
 
     #[test]
     fn every_theme_is_available_by_name() {
-        let user = r##"{ "font": { "ui_size": 12 }, "themes": { "paper": { "inherits": "emax-light" } } }"##;
+        let user = r##"{ "font": { "ui_size": 12 }, "themes": { "paper": { "inherits": "ymacs-light" } } }"##;
         let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", user)]);
         assert!(c.warnings.is_empty(), "{:#?}", c.warnings);
         let a = &c.appearance;
         let names: Vec<&str> = a.available.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, ["emax-dark", "emax-light", "paper", "solarized-dark", "solarized-light"]);
-        assert_eq!(a.theme_named("paper").unwrap().background, a.theme_named("emax-light").unwrap().background);
+        assert_eq!(names, ["paper", "solarized-dark", "solarized-light", "ymacs-dark", "ymacs-light"]);
+        assert_eq!(a.theme_named("paper").unwrap().background, a.theme_named("ymacs-light").unwrap().background);
         assert!(a.theme_named("solarized-dark").unwrap().is_dark());
         assert!(!a.theme_named("paper").unwrap().is_dark());
-        assert_eq!(a.themes.dark.name, "emax-dark");
+        assert_eq!(a.themes.dark.name, "ymacs-dark");
         assert_eq!((a.fonts.size, a.fonts.ui_size), (14.0, 12.0));
         assert_eq!(Config::builtin().appearance.fonts.ui_size, 14.0, "follows font.size by default");
     }
@@ -1017,13 +1017,13 @@ mod tests {
             move |name: &str| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| std::ffi::OsString::from(v))
         };
         let all =
-            env(&[("EMAX_CONFIG", "/e.json"), ("XDG_CONFIG_HOME", "/xdg"), ("APPDATA", "C:/AppData"), ("HOME", "/h")]);
+            env(&[("YMACS_CONFIG", "/e.json"), ("XDG_CONFIG_HOME", "/xdg"), ("APPDATA", "C:/AppData"), ("HOME", "/h")]);
         assert_eq!(user_config_path_in(&all, true), Some(PathBuf::from("/e.json")));
         let no_override = env(&[("XDG_CONFIG_HOME", "/xdg"), ("APPDATA", "C:/AppData"), ("HOME", "/h")]);
-        assert_eq!(user_config_path_in(&no_override, true), Some(PathBuf::from("/xdg/emax/config.json")));
+        assert_eq!(user_config_path_in(&no_override, true), Some(PathBuf::from("/xdg/ymacs/config.json")));
         let windows = env(&[("APPDATA", "C:/AppData"), ("HOME", "/h")]);
-        assert_eq!(user_config_path_in(&windows, true), Some(PathBuf::from("C:/AppData/emax/config.json")));
-        assert_eq!(user_config_path_in(&windows, false), Some(PathBuf::from("/h/.config/emax/config.json")));
+        assert_eq!(user_config_path_in(&windows, true), Some(PathBuf::from("C:/AppData/ymacs/config.json")));
+        assert_eq!(user_config_path_in(&windows, false), Some(PathBuf::from("/h/.config/ymacs/config.json")));
         assert_eq!(user_config_path_in(&env(&[]), true), None);
     }
 

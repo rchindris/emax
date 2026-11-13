@@ -1,8 +1,8 @@
-# emax
+# ymacs
 
 A fast, modern Emacs-style text editor written in Rust.
 
-emax keeps Emacs' editing model and key bindings, rendered on the GPU with
+ymacs keeps Emacs' editing model and key bindings, rendered on the GPU with
 [GPUI](https://www.gpui.rs/) and backed by a [ropey](https://github.com/cessen/ropey)
 rope. It is **not** an Emacs Lisp clone: the goal is the Emacs editing experience,
 without the Emacs runtime.
@@ -43,16 +43,16 @@ without the Emacs runtime.
 On macOS (Apple Silicon or Intel) with Homebrew:
 
 ```sh
-brew install rchindris/emax/emax
+brew install rchindris/ymacs/ymacs
 ```
 
 On Debian and Ubuntu, download the `.deb` for your architecture from the
-[latest release](https://github.com/rchindris/emax/releases/latest) and run
-`sudo apt install ./emax_*.deb`.
+[latest release](https://github.com/rchindris/ymacs/releases/latest) and run
+`sudo apt install ./ymacs_*.deb`.
 
 ## Building and running
 
-emax needs a recent stable Rust toolchain (Rust 1.88 or newer).
+ymacs needs a recent stable Rust toolchain (Rust 1.88 or newer).
 
 ```sh
 cargo run --release               # opens a *scratch* buffer with a key cheat sheet
@@ -100,13 +100,13 @@ These are the default bindings. The full set is in
 
 Settings and key bindings come from JSON. The defaults are in
 [`config/default.json`](config/default.json), which is built into the binary
-(`emax --print-default-config` prints it). Your own file is read from the first
+(`ymacs --print-default-config` prints it). Your own file is read from the first
 of these that is set:
 
-1. `$EMAX_CONFIG`
-2. `$XDG_CONFIG_HOME/emax/config.json`
-3. on Windows, `%APPDATA%\emax\config.json`
-4. `~/.config/emax/config.json`
+1. `$YMACS_CONFIG`
+2. `$XDG_CONFIG_HOME/ymacs/config.json`
+3. on Windows, `%APPDATA%\ymacs\config.json`
+4. `~/.config/ymacs/config.json`
 
 The easiest way to change settings is the settings editor, `s-,` (Cmd-,), which
 works like VS Code's: search settings by name or description (`@modified` lists
@@ -139,7 +139,7 @@ same keys. Setting an entry to `null` removes a default binding:
 | `font.size` | Buffer text size in pixels (default 14). The mode line and echo area use it too |
 | `font.ui_size` | Size the buffer picker, `M-x`, the search panel and the tab bar are drawn at, in pixels. Their text, spacing and rows scale with it (default `null`: same as `font.size`) |
 | `font.line_height` | Line height as a multiple of the size (default 1.5) |
-| `theme` | The theme to use (default `"emax-dark"`), or `{ "light": …, "dark": … }` to follow the system appearance. `M-x load-theme` switches while running |
+| `theme` | The theme to use (default `"ymacs-dark"`), or `{ "light": …, "dark": … }` to follow the system appearance. `M-x load-theme` switches while running |
 | `themes` | Theme definitions; see [Themes](#themes) |
 | `keymaps.global` | Editing keys; multi-key sequences like `"C-x C-s"` work. Values are command names (`forward-char`, `swiper`, …) |
 | `keymaps.picker` | Keys while a picker is open; values are `picker-*` actions (`TAB` is `picker-complete`). Keys left unbound edit the query like the global ones (`C-a`, `C-d`, `M-f`, `C-y`…) |
@@ -228,9 +228,9 @@ from `C-x f`), the major mode and its parents, then `editor`.
 
 ### Themes
 
-emax comes with `emax-dark`, `emax-light`, `solarized-dark` and
+ymacs comes with `ymacs-dark`, `ymacs-light`, `solarized-dark` and
 `solarized-light`. A theme is a set of colors
-written as `#rrggbb` or `#rrggbbaa`. `emax --print-default-config` lists every
+written as `#rrggbb` or `#rrggbbaa`. `ymacs --print-default-config` lists every
 color name with its value in both built-in themes.
 
 To change a few colors of a built-in theme, set just those colors under its
@@ -239,16 +239,16 @@ so you only list what differs:
 
 ```json
 {
-  "theme": { "light": "paper", "dark": "emax-dark" },
+  "theme": { "light": "paper", "dark": "ymacs-dark" },
   "themes": {
-    "emax-dark": { "cursor": "#ff6c6b" },
-    "paper": { "inherits": "emax-light", "background": "#fdf6e3", "current_line": "#f5eedc" }
+    "ymacs-dark": { "cursor": "#ff6c6b" },
+    "paper": { "inherits": "ymacs-light", "background": "#fdf6e3", "current_line": "#f5eedc" }
   }
 }
 ```
 
 A theme that doesn't `inherit` should define every color. Any color it leaves
-out is taken from `emax-dark`, and the echo area warns about it.
+out is taken from `ymacs-dark`, and the echo area warns about it.
 
 Syntax highlighting colors are `syntax.<capture>` keys, named after
 tree-sitter's highlight captures: `syntax.keyword`, `syntax.string`,
@@ -258,7 +258,7 @@ name (`function.method` falls back to `function`), and text with no color at all
 uses `foreground`:
 
 ```json
-{ "themes": { "emax-dark": { "syntax.keyword": "#ff79c6", "syntax.comment": "#6272a4" } } }
+{ "themes": { "ymacs-dark": { "syntax.keyword": "#ff79c6", "syntax.comment": "#6272a4" } } }
 ```
 `M-x load-theme` lists every theme, with each one shown live as you move
 through the list. `RET` keeps the theme until you quit (it then stays fixed, even
@@ -302,4 +302,4 @@ several `|` mean several cursors.
 
 ## License
 
-emax is released under the [MIT License](LICENSE).
+ymacs is released under the [MIT License](LICENSE).

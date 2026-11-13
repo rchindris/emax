@@ -9,12 +9,12 @@ use std::sync::Arc;
 
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px, rgba};
 
-use emax::engine::settings::{Edit, Kind, MODIFIED_FILTER, Row, SETTINGS, Setting, SettingsEditor};
-use emax::engine::{Config, Theme, config};
+use ymacs::engine::settings::{Edit, Kind, MODIFIED_FILTER, Row, SETTINGS, Setting, SettingsEditor};
+use ymacs::engine::{Config, Theme, config};
 
-use super::{EmaxView, hints, query_with_caret};
+use super::{YmacsView, hints, query_with_caret};
 
-impl EmaxView {
+impl YmacsView {
     /// After the settings editor handled a key or a click: apply what it
     /// wrote, update the echo area and, for keys, bring the selection on screen.
     pub(super) fn after_settings(&mut self, reveal: bool, cx: &mut Context<Self>) {

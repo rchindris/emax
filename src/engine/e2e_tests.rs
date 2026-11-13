@@ -28,7 +28,7 @@ use super::window::{Rect, compute_rects};
 
 // ---------------------------------------------------------------- harness
 
-/// An editor driven like `EmaxView`: keys go to a char-mode terminal first,
+/// An editor driven like `YmacsView`: keys go to a char-mode terminal first,
 /// then to the dispatcher; `tick` is what the waker leads to.
 struct E {
     ed: Editor,

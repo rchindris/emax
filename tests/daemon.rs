@@ -1,4 +1,4 @@
-//! The real session daemon: the `emax` binary started with `--pty-daemon`
+//! The real session daemon: the `ymacs` binary started with `--pty-daemon`
 //! on a temporary socket, reached through `DaemonBackend` like the editor
 //! does. Every daemon started here also has an idle exit, so none outlives
 //! the tests even if one fails half-way.
@@ -10,12 +10,12 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use emax::engine::pty::{PtyBackend, PtyEvent, PtySize, SessionId, SpawnSpec, noop_waker};
-use emax::engine::session::client::DaemonBackend;
-use emax::engine::session::daemon::exit_code;
+use ymacs::engine::pty::{PtyBackend, PtyEvent, PtySize, SessionId, SpawnSpec, noop_waker};
+use ymacs::engine::session::client::DaemonBackend;
+use ymacs::engine::session::daemon::exit_code;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
-const EMAX: &str = env!("CARGO_BIN_EXE_emax");
+const YMACS: &str = env!("CARGO_BIN_EXE_ymacs");
 
 fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
     let start = Instant::now();
@@ -29,14 +29,14 @@ fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
 fn temp_dir(tag: &str) -> PathBuf {
     static N: AtomicUsize = AtomicUsize::new(0);
     let d =
-        std::env::temp_dir().join(format!("emax-i{}-{tag}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+        std::env::temp_dir().join(format!("ymacs-i{}-{tag}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
 }
 
 fn start(socket: &Path) -> DaemonBackend {
-    DaemonBackend::connect_or_start_with(Path::new(EMAX), socket, 1 << 20, Some(Duration::from_secs(20)), noop_waker())
+    DaemonBackend::connect_or_start_with(Path::new(YMACS), socket, 1 << 20, Some(Duration::from_secs(20)), noop_waker())
         .expect("start the daemon")
 }
 
@@ -135,7 +135,7 @@ fn an_idle_daemon_goes_away() {
     let dir = temp_dir("idle");
     let socket = dir.join("d.sock");
     let b = DaemonBackend::connect_or_start_with(
-        Path::new(EMAX),
+        Path::new(YMACS),
         &socket,
         1024,
         Some(Duration::from_secs(1)),
@@ -150,7 +150,7 @@ fn an_idle_daemon_goes_away() {
 #[test]
 fn the_daemon_command_line() {
     let dir = temp_dir("cli");
-    let run = |args: &[&str]| Command::new(EMAX).arg("--pty-daemon").args(args).output().unwrap();
+    let run = |args: &[&str]| Command::new(YMACS).arg("--pty-daemon").args(args).output().unwrap();
     let out = run(&["--bogus"]);
     assert_eq!(out.status.code(), Some(exit_code::USAGE));
     assert!(String::from_utf8_lossy(&out.stderr).contains("--bogus"));
@@ -174,7 +174,7 @@ fn a_detached_daemon_with_a_relative_socket_path_still_serves_and_exits() {
     // The detached daemon moves to $HOME; the relative path must keep
     // naming the socket it bound (for its log, its idle exit and cleanup).
     let dir = temp_dir("rel");
-    let out = Command::new(EMAX)
+    let out = Command::new(YMACS)
         .current_dir(&dir)
         .args(["--pty-daemon", "--socket", "d.sock", "--idle-exit", "1"])
         .output()

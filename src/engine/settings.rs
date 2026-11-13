@@ -136,14 +136,14 @@ settings! {
     "terminal.replay_bytes", "Terminal", "Terminal: Replay Bytes", Kind::Int { min: 0, max: 268_435_456 },
         "Output the daemon keeps per terminal to redraw it when the editor reattaches, in bytes.";
     "terminal.socket", "Terminal", "Terminal: Daemon Socket", Kind::Text { nullable: true, placeholder: "default location" },
-        "Path of the session daemon's socket. Leave empty for the default ($EMAX_PTYD_SOCKET overrides both).";
+        "Path of the session daemon's socket. Leave empty for the default ($YMACS_PTYD_SOCKET overrides both).";
     "terminal.daemon_idle_exit", "Terminal", "Terminal: Daemon Idle Exit", Kind::Int { min: 0, max: 31_536_000 },
         "Seconds the daemon waits with no terminals and no editor attached before it exits. 0: never.";
     "terminal.escape_keys", "Terminal", "Terminal: Escape Keys", Kind::List,
         "Keys that reach the editor instead of the program in char mode (Emacs notation, separated by commas), e.g. C-x, M-x.";
 
     "session.restore_session", "Session", "Session: Restore Session", Kind::Bool,
-        "Save tabs, windows and buffers on quit and restore them when emax starts without files.";
+        "Save tabs, windows and buffers on quit and restore them when ymacs starts without files.";
     "session.state_dir", "Session", "Session: State Directory", Kind::Text { nullable: true, placeholder: "platform default" },
         "Directory the session file is kept in. Takes effect after a restart.";
 }

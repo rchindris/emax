@@ -1,11 +1,11 @@
 [package]
-name = "emax"
+name = "ymacs"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
 description = "A fast, GPU-rendered editor with Emacs keys"
-repository = "https://github.com/rchindris/emax"
+repository = "https://github.com/rchindris/ymacs"
 readme = "README.md"
 
 [dependencies]
@@ -43,11 +43,11 @@ opt-level = 3
 maintainer = "Radu Chindris <radu.chindris@uzina-software.com>"
 section = "editors"
 extended-description = """\
-emax keeps Emacs' editing model and key bindings, rendered on the GPU with GPUI
+ymacs keeps Emacs' editing model and key bindings, rendered on the GPU with GPUI
 and backed by a rope. It is not an Emacs Lisp clone."""
 depends = "$auto"
 assets = [
-  ["target/release/emax", "usr/bin/", "755"],
-  ["README.md", "usr/share/doc/emax/", "644"],
-  ["LICENSE", "usr/share/doc/emax/copyright", "644"],
+  ["target/release/ymacs", "usr/bin/", "755"],
+  ["README.md", "usr/share/doc/ymacs/", "644"],
+  ["LICENSE", "usr/share/doc/ymacs/copyright", "644"],
 ]

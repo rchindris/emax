@@ -158,7 +158,7 @@ fn theme_syntax_colors_fall_back_and_merge() {
     assert_eq!(t.syntax_color("function.method"), t.syntax_color("function"));
     assert_eq!(t.syntax_color("keyword.control.flow"), t.syntax_color("keyword"));
     assert_eq!(t.syntax_color("nothing.like.this"), None);
-    let user = r##"{ "themes": { "emax-dark": { "syntax.keyword": "#ff0000", "syntax.function.method": "#00ff00", "syntax.oops": "red" } } }"##;
+    let user = r##"{ "themes": { "ymacs-dark": { "syntax.keyword": "#ff0000", "syntax.function.method": "#00ff00", "syntax.oops": "red" } } }"##;
     let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", user)]);
     assert!(c.warnings.iter().any(|w| w.contains("syntax.oops")), "{:#?}", c.warnings);
     let u = &c.appearance.themes.dark;
@@ -192,8 +192,8 @@ fn every_language_highlights_its_basics() {
         ("bash", "if true; then echo \"hi\"; fi # done\n", "# done", comment),
         ("python", "def f(x):\n    return 'a'  # c\n", "def", kw),
         ("python", "def f(x):\n    return 'a'  # c\n", "'a'", string),
-        ("toml", "[package]\nname = \"emax\" # c\n", "\"emax\"", string),
-        ("toml", "[package]\nname = \"emax\" # c\n", "name", t.syntax_color("type")),
+        ("toml", "[package]\nname = \"ymacs\" # c\n", "\"ymacs\"", string),
+        ("toml", "[package]\nname = \"ymacs\" # c\n", "name", t.syntax_color("type")),
         ("yaml", "key: \"value\" # c\n", "# c", comment),
         ("yaml", "key: \"value\" # c\n", "\"value\"", string),
         ("scheme", "(define (f x) \"s\") ; c\n", "\"s\"", string),

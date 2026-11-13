@@ -57,7 +57,7 @@ fn t() -> T {
 }
 
 impl T {
-    /// Like `EmaxView::handle_key`: char-mode terminals first, then the dispatcher.
+    /// Like `YmacsView::handle_key`: char-mode terminals first, then the dispatcher.
     fn key(&mut self, k: &str) -> &mut Self {
         let key = Key::parse(k);
         if self.ed.picker.is_some() {

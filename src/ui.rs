@@ -25,14 +25,14 @@ use gpui::{
     Window, div, point, prelude::*, px, rgba, uniform_list,
 };
 
-use emax::engine::dired::Face;
-use emax::engine::picker::{Picker, PickerKind};
-use emax::engine::term::Palette;
-use emax::engine::window::{Rect, WindowId, compute_rects};
-use emax::engine::{
+use ymacs::engine::dired::Face;
+use ymacs::engine::picker::{Picker, PickerKind};
+use ymacs::engine::term::Palette;
+use ymacs::engine::window::{Rect, WindowId, compute_rects};
+use ymacs::engine::{
     Appearance, Args, BufView, Dispatcher, Editor, Key, Keymap, Keymaps, Outcome, Scroll, Theme, ThemeRequest, text,
 };
-use emax::engine::{Swiper, SwiperExit};
+use ymacs::engine::{Swiper, SwiperExit};
 
 // ------------------------------------------------------------------ layout
 
@@ -49,7 +49,7 @@ const SWIPER_ROWS: usize = 10;
 /// Search panel candidates longer than this are cut off.
 const SWIPER_COLS: usize = 400;
 
-pub struct EmaxView {
+pub struct YmacsView {
     ed: Editor,
     keys: Dispatcher,
     /// Keys while the buffer picker / the search panel is open.
@@ -84,7 +84,7 @@ pub struct EmaxView {
     cell_w: f32,
 }
 
-impl EmaxView {
+impl YmacsView {
     pub fn new(
         mut ed: Editor,
         keymaps: Keymaps,
@@ -110,7 +110,7 @@ impl EmaxView {
         })
         .detach();
         // Closing the window or quitting the app (Cmd-Q, the menu) runs the
-        // kill-emacs hooks too, so the session is saved however emax ends.
+        // kill-emacs hooks too, so the session is saved however ymacs ends.
         cx.on_app_quit(|view: &mut Self, _| {
             view.ed.exit();
             async {}
@@ -720,7 +720,7 @@ impl EmaxView {
     }
 }
 
-impl EmaxView {
+impl YmacsView {
     /// The search panel, docked under the buffer like Emacs' minibuffer: the
     /// query line, then a window of matching lines around the selection.
     fn render_swiper(&self, s: &Swiper, gutter_w: gpui::Pixels, cx: &mut Context<Self>) -> AnyElement {
@@ -846,7 +846,7 @@ impl EmaxView {
 /// non-breaking spaces so a trailing space still moves the caret.
 /// A text field's text with the caret drawn `tail` bytes before its end.
 fn query_with_caret(query: &str, tail: usize, caret_h: gpui::Pixels, t: &Theme) -> impl IntoElement {
-    let p = emax::engine::line_edit::point(query, tail);
+    let p = ymacs::engine::line_edit::point(query, tail);
     let (before, after) = query.split_at(p);
     let text = |s: &str| div().text_color(rgba(t.emphasis)).child(s.replace(' ', "\u{a0}"));
     div()
@@ -1105,7 +1105,7 @@ struct ModeLine {
     previewing: bool,
 }
 
-impl EmaxView {
+impl YmacsView {
     /// Mode line facts for window `win`, or `None` if it has no buffer.
     fn mode_line_info(&self, win: WindowId) -> Option<ModeLine> {
         let v = self.ed.window_view(win)?;
@@ -1142,7 +1142,7 @@ impl EmaxView {
         uniform_list(
             ("window", win.0 as usize),
             m.total,
-            cx.processor(move |this: &mut EmaxView, range: Range<usize>, _w, _cx| {
+            cx.processor(move |this: &mut YmacsView, range: Range<usize>, _w, _cx| {
                 let started = Instant::now();
                 let t = this.theme();
                 let Some(v) = this.ed.window_view(win) else { return Vec::new() };
@@ -1287,7 +1287,7 @@ impl EmaxView {
                 let snap = if owns_terminal {
                     let panel = if selected && self.ed.swiper.is_some() { self.swiper_panel_height() } else { 0.0 };
                     let border = if right_edge { 1.0 } else { 0.0 };
-                    let (cols, rows) = emax::engine::term::grid_size(
+                    let (cols, rows) = ymacs::engine::term::grid_size(
                         r.w - border,
                         r.h - self.modeline_height() - panel,
                         self.cell_w,
@@ -1373,13 +1373,13 @@ impl EmaxView {
     }
 }
 
-impl Focusable for EmaxView {
+impl Focusable for YmacsView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
     }
 }
 
-impl Render for EmaxView {
+impl Render for YmacsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Spacing utilities are in rems: scale them with the font as well.
         window.set_rem_size(px(DESIGN_REM * self.ui_scale()));

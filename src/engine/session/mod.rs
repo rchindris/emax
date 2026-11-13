@@ -97,20 +97,20 @@ fn env_path(env: Env, name: &str) -> Option<PathBuf> {
 }
 
 /// Where the daemon listens when nothing is configured:
-/// `$EMAX_PTYD_SOCKET`, else `$TMPDIR/emax-$UID/ptyd.sock`.
+/// `$YMACS_PTYD_SOCKET`, else `$TMPDIR/ymacs-$UID/ptyd.sock`.
 pub fn default_socket_path() -> PathBuf {
     socket_path(None)
 }
 
-/// Where the daemon listens: `$EMAX_PTYD_SOCKET`, else `configured`
-/// (`terminal.socket`), else `$TMPDIR/emax-$UID/ptyd.sock` (a directory
+/// Where the daemon listens: `$YMACS_PTYD_SOCKET`, else `configured`
+/// (`terminal.socket`), else `$TMPDIR/ymacs-$UID/ptyd.sock` (a directory
 /// private to this user). The environment wins, as for [`state_dir`].
 pub fn socket_path(configured: Option<&Path>) -> PathBuf {
     socket_path_in(&process_env, configured, &std::env::temp_dir())
 }
 
 fn socket_path_in(env: Env, configured: Option<&Path>, tmp: &Path) -> PathBuf {
-    if let Some(p) = env_path(env, "EMAX_PTYD_SOCKET") {
+    if let Some(p) = env_path(env, "YMACS_PTYD_SOCKET") {
         return p;
     }
     if let Some(p) = configured {
@@ -118,12 +118,12 @@ fn socket_path_in(env: Env, configured: Option<&Path>, tmp: &Path) -> PathBuf {
     }
     // SAFETY: getuid has no preconditions and cannot fail.
     let uid = unsafe { libc::getuid() };
-    tmp.join(format!("emax-{uid}")).join("ptyd.sock")
+    tmp.join(format!("ymacs-{uid}")).join("ptyd.sock")
 }
 
-/// Where session state is kept: `$EMAX_STATE_DIR`, else `configured`
-/// (`session.state_dir`), else `$XDG_STATE_HOME/emax`, else
-/// on Windows `%LOCALAPPDATA%\emax`, else `~/.local/state/emax`.
+/// Where session state is kept: `$YMACS_STATE_DIR`, else `configured`
+/// (`session.state_dir`), else `$XDG_STATE_HOME/ymacs`, else
+/// on Windows `%LOCALAPPDATA%\ymacs`, else `~/.local/state/ymacs`.
 pub fn state_dir(configured: Option<&Path>) -> Option<PathBuf> {
     state_dir_for(&process_env, configured, cfg!(windows))
 }
@@ -134,16 +134,16 @@ fn state_dir_in(env: Env, configured: Option<&Path>) -> Option<PathBuf> {
 }
 
 fn state_dir_for(env: Env, configured: Option<&Path>, windows: bool) -> Option<PathBuf> {
-    if let Some(p) = env_path(env, "EMAX_STATE_DIR") {
+    if let Some(p) = env_path(env, "YMACS_STATE_DIR") {
         return Some(p);
     }
     if let Some(p) = configured {
         return Some(p.to_path_buf());
     }
     env_path(env, "XDG_STATE_HOME")
-        .map(|p| p.join("emax"))
-        .or_else(|| if windows { env_path(env, "LOCALAPPDATA").map(|p| p.join("emax")) } else { None })
-        .or_else(|| env_path(env, "HOME").map(|h| h.join(".local").join("state").join("emax")))
+        .map(|p| p.join("ymacs"))
+        .or_else(|| if windows { env_path(env, "LOCALAPPDATA").map(|p| p.join("ymacs")) } else { None })
+        .or_else(|| env_path(env, "HOME").map(|h| h.join(".local").join("state").join("ymacs")))
 }
 
 /// The session file in `dir`.
@@ -467,7 +467,7 @@ impl Editor {
 
     /// The startup policy for the saved session: restore it from `file` when
     /// `session.restore_session` is on and no files were named on the
-    /// command line, and then save it there on quit. A quick `emax file`
+    /// command line, and then save it there on quit. A quick `ymacs file`
     /// neither restores nor overwrites the saved workspace (its terminal
     /// processes live on in the daemon either way). The echo area keeps the
     /// startup message when there is nothing to restore, and always when
@@ -585,17 +585,17 @@ mod tests {
     #[test]
     fn state_dir_precedence() {
         let cfg = Some(Path::new("/cfg/state"));
-        let all = env_of(&[("EMAX_STATE_DIR", "/env/state"), ("XDG_STATE_HOME", "/xdg"), ("HOME", "/home/u")]);
+        let all = env_of(&[("YMACS_STATE_DIR", "/env/state"), ("XDG_STATE_HOME", "/xdg"), ("HOME", "/home/u")]);
         assert_eq!(state_dir_in(&all, cfg), Some(PathBuf::from("/env/state")), "the environment wins");
-        let no_override = env_of(&[("EMAX_STATE_DIR", ""), ("XDG_STATE_HOME", "/xdg"), ("HOME", "/home/u")]);
+        let no_override = env_of(&[("YMACS_STATE_DIR", ""), ("XDG_STATE_HOME", "/xdg"), ("HOME", "/home/u")]);
         assert_eq!(state_dir_in(&no_override, cfg), Some(PathBuf::from("/cfg/state")), "then the configuration");
-        assert_eq!(state_dir_in(&no_override, None), Some(PathBuf::from("/xdg/emax")), "then XDG_STATE_HOME");
+        assert_eq!(state_dir_in(&no_override, None), Some(PathBuf::from("/xdg/ymacs")), "then XDG_STATE_HOME");
         let home = env_of(&[("XDG_STATE_HOME", ""), ("HOME", "/home/u")]);
-        assert_eq!(state_dir_in(&home, None), Some(PathBuf::from("/home/u/.local/state/emax")), "then ~/.local/state");
+        assert_eq!(state_dir_in(&home, None), Some(PathBuf::from("/home/u/.local/state/ymacs")), "then ~/.local/state");
         assert_eq!(state_dir_in(&env_of(&[]), None), None);
         let windows = env_of(&[("LOCALAPPDATA", "C:/Local"), ("HOME", "/home/u")]);
-        assert_eq!(state_dir_for(&windows, None, true), Some(PathBuf::from("C:/Local/emax")), "Windows: LOCALAPPDATA");
-        assert_eq!(state_dir_for(&windows, None, false), Some(PathBuf::from("/home/u/.local/state/emax")));
+        assert_eq!(state_dir_for(&windows, None, true), Some(PathBuf::from("C:/Local/ymacs")), "Windows: LOCALAPPDATA");
+        assert_eq!(state_dir_for(&windows, None, false), Some(PathBuf::from("/home/u/.local/state/ymacs")));
         assert_eq!(session_file_path(Path::new("/s")), PathBuf::from("/s/session.json"));
     }
 
@@ -603,19 +603,19 @@ mod tests {
     fn socket_path_precedence() {
         let cfg = Some(Path::new("/cfg/d.sock"));
         let tmp = Path::new("/tmpdir");
-        let env = env_of(&[("EMAX_PTYD_SOCKET", "/env/d.sock")]);
+        let env = env_of(&[("YMACS_PTYD_SOCKET", "/env/d.sock")]);
         assert_eq!(
             socket_path_in(&env, cfg, tmp),
             PathBuf::from("/env/d.sock"),
             "the environment wins, as for state_dir"
         );
-        let none = env_of(&[("EMAX_PTYD_SOCKET", "")]);
+        let none = env_of(&[("YMACS_PTYD_SOCKET", "")]);
         assert_eq!(socket_path_in(&none, cfg, tmp), PathBuf::from("/cfg/d.sock"));
         // SAFETY: getuid has no preconditions.
         let uid = unsafe { libc::getuid() };
         assert_eq!(
             socket_path_in(&none, None, tmp),
-            PathBuf::from(format!("/tmpdir/emax-{uid}/ptyd.sock")),
+            PathBuf::from(format!("/tmpdir/ymacs-{uid}/ptyd.sock")),
             "a per-user directory"
         );
     }
@@ -1040,7 +1040,7 @@ mod tests {
     }
 
     /// `main`'s startup: restore only with `restore_session` on, no files
-    /// named and a session file present; `emax file` neither restores nor
+    /// named and a session file present; `ymacs file` neither restores nor
     /// overwrites the saved workspace; config problems keep the echo area.
     #[test]
     fn startup_restores_and_saves_only_without_files() {
@@ -1057,7 +1057,7 @@ mod tests {
         let saves_on_quit = |ed: &Editor| ed.hooks.handler_names(EventKind::KillEmacs).contains(&SAVE_HOOK);
         let has_notes = |ed: &Editor| ed.buffer_ids().into_iter().any(|id| ed.buffer_name(id) == Some("*notes*"));
 
-        // `emax file`: nothing restored, and quitting leaves the file alone.
+        // `ymacs file`: nothing restored, and quitting leaves the file alone.
         let mut ed = fresh(true);
         assert!(ed.startup_session(Some(path.clone()), true, false).is_none());
         assert!(!has_notes(&ed) && !saves_on_quit(&ed));
@@ -1073,7 +1073,7 @@ mod tests {
         assert!(ed.startup_session(None, false, false).is_none());
         assert!(!saves_on_quit(&ed));
 
-        // Plain `emax`: restored, the summary shown, saved on quit.
+        // Plain `ymacs`: restored, the summary shown, saved on quit.
         let mut ed = fresh(true);
         assert!(ed.startup_session(Some(path.clone()), false, false).is_none());
         assert!(has_notes(&ed) && saves_on_quit(&ed));

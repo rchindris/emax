@@ -1492,33 +1492,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
-name = "emax"
-version = "0.1.0"
-dependencies = [
- "alacritty_terminal",
- "futures",
- "gpui",
- "libc",
- "portable-pty",
- "postcard",
- "ropey",
- "serde",
- "serde_json",
- "streaming-iterator",
- "tree-sitter",
- "tree-sitter-bash",
- "tree-sitter-elisp",
- "tree-sitter-json",
- "tree-sitter-language",
- "tree-sitter-md",
- "tree-sitter-python",
- "tree-sitter-rust",
- "tree-sitter-scheme",
- "tree-sitter-toml-ng",
- "tree-sitter-yaml",
-]
-
-[[package]]
 name = "embed-resource"
 version = "3.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7187,6 +7160,33 @@ dependencies = [
  "dlib",
  "once_cell",
  "pkg-config",
+]
+
+[[package]]
+name = "ymacs"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "futures",
+ "gpui",
+ "libc",
+ "portable-pty",
+ "postcard",
+ "ropey",
+ "serde",
+ "serde_json",
+ "streaming-iterator",
+ "tree-sitter",
+ "tree-sitter-bash",
+ "tree-sitter-elisp",
+ "tree-sitter-json",
+ "tree-sitter-language",
+ "tree-sitter-md",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-scheme",
+ "tree-sitter-toml-ng",
+ "tree-sitter-yaml",
 ]
 
 [[package]]

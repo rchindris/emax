@@ -29,7 +29,7 @@ use super::editor::Editor;
 use super::theme::{Rgba, Theme};
 use tree_sitter_language::LanguageFn;
 
-/// A language emax can parse.
+/// A language ymacs can parse.
 pub struct LanguageDef {
     /// The name modes use in `"syntax"`.
     pub name: &'static str,

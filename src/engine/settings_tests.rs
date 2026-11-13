@@ -78,7 +78,7 @@ fn search_filters_and_modified_filter() {
 
 #[test]
 fn editing_a_number_writes_only_that_key() {
-    let (mut ed, km, path) = open(Some(r#"{ "theme": "emax-light", "keymaps": { "global": { "C-z": "undo" } } }"#));
+    let (mut ed, km, path) = open(Some(r#"{ "theme": "ymacs-light", "keymaps": { "global": { "C-z": "undo" } } }"#));
     typ(&mut ed, &km, "fill column");
     keys(&mut ed, &km, "RET");
     assert_eq!(s(&ed).edit, Some(Edit::Text { input: "70".into(), error: None }));
