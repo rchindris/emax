@@ -173,3 +173,92 @@ fn theme_syntax_colors_fall_back_and_merge() {
         }
     }
 }
+
+/// The color of the first occurrence of `needle` in `text` (`lang`), if it has one.
+fn color_of(lang: &str, text: &str, needle: &str) -> Option<Rgba> {
+    let (rope, s) = parsed(lang, text);
+    let colors = s.highlight(&rope, 0..rope.len_lines(), &theme());
+    let at = rope.byte_to_char(text.find(needle).unwrap_or_else(|| panic!("{needle:?} in {text:?}")));
+    let line = rope.char_to_line(at);
+    color_at(&colors, line, at - rope.line_to_char(line))
+}
+
+#[test]
+fn every_language_highlights_its_basics() {
+    let t = theme();
+    let (kw, string, comment) = (t.syntax_color("keyword"), t.syntax_color("string"), t.syntax_color("comment"));
+    let cases: &[(&str, &str, &str, Option<Rgba>)] = &[
+        ("bash", "if true; then echo \"hi\"; fi # done\n", "if", kw),
+        ("bash", "if true; then echo \"hi\"; fi # done\n", "# done", comment),
+        ("python", "def f(x):\n    return 'a'  # c\n", "def", kw),
+        ("python", "def f(x):\n    return 'a'  # c\n", "'a'", string),
+        ("toml", "[package]\nname = \"ymacs\" # c\n", "\"ymacs\"", string),
+        ("toml", "[package]\nname = \"ymacs\" # c\n", "name", t.syntax_color("type")),
+        ("yaml", "key: \"value\" # c\n", "# c", comment),
+        ("yaml", "key: \"value\" # c\n", "\"value\"", string),
+        ("scheme", "(define (f x) \"s\") ; c\n", "\"s\"", string),
+        ("scheme", "(define (f x) \"s\") ; c\n", "; c", comment),
+        ("elisp", "(defun f (x) \"doc\") ; c\n", "defun", kw),
+        ("elisp", "(defun f (x) \"doc\") ; c\n", "; c", comment),
+    ];
+    for &(lang, text, needle, want) in cases {
+        assert!(want.is_some(), "the theme colors {needle:?}");
+        assert_eq!(color_of(lang, text, needle), want, "{lang}: {needle:?} in {text:?}");
+    }
+}
+
+#[test]
+fn markdown_highlights_inline_text_and_fenced_code_in_its_language() {
+    let t = theme();
+    let text = "# Title\n\nSome *emph* and `code` [link](http://x.org).\n\n```rust\nfn main() {}\n```\n\n```nosuchlang\nfn main() {}\n```\n";
+    assert_eq!(color_of("markdown", text, "Title"), t.syntax_color("text.title"));
+    assert_eq!(color_of("markdown", text, "emph"), t.syntax_color("text.emphasis"));
+    assert_eq!(color_of("markdown", text, "code`"), t.syntax_color("text.literal"));
+    assert_eq!(color_of("markdown", text, "http"), t.syntax_color("text.uri"));
+    assert_eq!(color_of("markdown", text, "Some"), None);
+    // The fence is Rust: its keyword is a keyword, painted over the block's color.
+    assert_eq!(color_of("markdown", text, "fn main"), t.syntax_color("keyword"));
+    // An unknown language keeps the code block's own color.
+    let unknown = text.rfind("fn main").unwrap();
+    let (rope, s) = parsed("markdown", text);
+    let colors = s.highlight(&rope, 0..rope.len_lines(), &t);
+    let line = rope.byte_to_line(unknown);
+    assert_eq!(color_at(&colors, line, 0), t.syntax_color("text.literal"));
+    // Only the code on screen is kept parsed.
+    // (the heading's and the paragraph's inline text, and the Rust fence)
+    assert_eq!(s.injected.lock().unwrap().len(), 3);
+    s.highlight(&rope, 0..1, &t);
+    assert_eq!(s.injected.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn embedded_languages_are_found_by_alias() {
+    assert_eq!(language_named("sh").map(|l| l.name), Some("bash"));
+    assert_eq!(language_named("Python").map(|l| l.name), Some("python"));
+    assert_eq!(language_named("yml").map(|l| l.name), Some("yaml"));
+    assert!(language_named("cobol").is_none());
+}
+
+#[test]
+fn file_names_and_interpreters_pick_the_new_modes() {
+    let ed = Editor::new(Buffer::from_str("t", ""));
+    let detect = |name: &str, text: &str| {
+        let mut b = Buffer::from_str(name, text);
+        b.path = Some(std::path::PathBuf::from(format!("/tmp/{name}")));
+        ed.modes.detect(&b).and_then(|m| ed.modes.syntax(m)).map(str::to_string)
+    };
+    for (name, text, want) in [
+        ("notes.md", "", "markdown"),
+        ("Cargo.toml", "", "toml"),
+        ("ci.yml", "", "yaml"),
+        ("build.sh", "", "bash"),
+        ("run", "#!/usr/bin/env bash\n", "bash"),
+        (".zshrc", "", "bash"),
+        ("tool.py", "", "python"),
+        ("tool", "#!/usr/bin/env python3\n", "python"),
+        ("init.scm", "", "scheme"),
+        ("init.el", "", "elisp"),
+    ] {
+        assert_eq!(detect(name, text).as_deref(), Some(want), "{name}");
+    }
+}

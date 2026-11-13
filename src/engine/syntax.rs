@@ -15,8 +15,9 @@
 //! Languages are compiled in: [`LANGUAGES`] lists them, each a grammar and
 //! its highlights query. Adding one is a line there plus the grammar crate.
 
+use std::collections::HashMap;
 use std::ops::{ControlFlow, Range};
-use std::sync::OnceLock;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use ropey::Rope;
@@ -32,15 +33,52 @@ use tree_sitter_language::LanguageFn;
 pub struct LanguageDef {
     /// The name modes use in `"syntax"`.
     pub name: &'static str,
+    /// Other names it goes by, as in Markdown code fences (`sh`, `py`).
+    pub aliases: &'static [&'static str],
     grammar: LanguageFn,
     highlights: &'static str,
+    /// Where other languages are embedded (`""` when nowhere), see [`Syntax::highlight`].
+    injections: &'static str,
+}
+
+const fn lang(name: &'static str, grammar: LanguageFn, highlights: &'static str) -> LanguageDef {
+    LanguageDef { name, aliases: &[], grammar, highlights, injections: "" }
 }
 
 /// Every language, by name.
 pub static LANGUAGES: &[LanguageDef] = &[
-    LanguageDef { name: "json", grammar: tree_sitter_json::LANGUAGE, highlights: tree_sitter_json::HIGHLIGHTS_QUERY },
-    LanguageDef { name: "rust", grammar: tree_sitter_rust::LANGUAGE, highlights: tree_sitter_rust::HIGHLIGHTS_QUERY },
+    LanguageDef {
+        aliases: &["sh", "shell", "zsh", "shellscript", "console"],
+        ..lang("bash", tree_sitter_bash::LANGUAGE, tree_sitter_bash::HIGHLIGHT_QUERY)
+    },
+    LanguageDef {
+        aliases: &["emacs-lisp", "lisp"],
+        ..lang("elisp", tree_sitter_elisp::LANGUAGE, tree_sitter_elisp::HIGHLIGHTS_QUERY)
+    },
+    LanguageDef { aliases: &["jsonc"], ..lang("json", tree_sitter_json::LANGUAGE, tree_sitter_json::HIGHLIGHTS_QUERY) },
+    LanguageDef {
+        aliases: &["md"],
+        injections: tree_sitter_md::INJECTION_QUERY_BLOCK,
+        ..lang("markdown", tree_sitter_md::LANGUAGE, tree_sitter_md::HIGHLIGHT_QUERY_BLOCK)
+    },
+    // Paragraph text, embedded by `markdown`.
+    lang("markdown_inline", tree_sitter_md::INLINE_LANGUAGE, tree_sitter_md::HIGHLIGHT_QUERY_INLINE),
+    LanguageDef {
+        aliases: &["py", "python3"],
+        ..lang("python", tree_sitter_python::LANGUAGE, tree_sitter_python::HIGHLIGHTS_QUERY)
+    },
+    LanguageDef { aliases: &["rs"], ..lang("rust", tree_sitter_rust::LANGUAGE, tree_sitter_rust::HIGHLIGHTS_QUERY) },
+    LanguageDef {
+        aliases: &["scm", "racket", "steel", "guile"],
+        ..lang("scheme", tree_sitter_scheme::LANGUAGE, tree_sitter_scheme::HIGHLIGHTS_QUERY)
+    },
+    lang("toml", tree_sitter_toml_ng::LANGUAGE, tree_sitter_toml_ng::HIGHLIGHTS_QUERY),
+    LanguageDef { aliases: &["yml"], ..lang("yaml", tree_sitter_yaml::LANGUAGE, tree_sitter_yaml::HIGHLIGHTS_QUERY) },
 ];
+
+/// Embedded languages nest at most this deep (Markdown text in a code
+/// fence in Markdown…).
+const MAX_INJECTION_DEPTH: usize = 3;
 
 /// A parse that takes longer than this is given up and the buffer is shown
 /// without highlighting (it never stalls typing).
@@ -48,6 +86,13 @@ const PARSE_BUDGET: Duration = Duration::from_millis(500);
 
 pub fn language(name: &str) -> Option<&'static LanguageDef> {
     LANGUAGES.iter().find(|l| l.name == name)
+}
+
+/// A language by its name or an alias, ignoring case: how embedded code
+/// names its language (a Markdown fence's info string).
+pub fn language_named(name: &str) -> Option<&'static LanguageDef> {
+    let name = name.to_ascii_lowercase();
+    LANGUAGES.iter().find(|l| l.name == name || l.aliases.contains(&name.as_str()))
 }
 
 /// The names of the languages, for messages.
@@ -59,6 +104,14 @@ pub fn language_names() -> Vec<&'static str> {
 struct Compiled {
     language: Language,
     query: Query,
+    injections: Option<Injections>,
+}
+
+/// A compiled injections query and the indices of its captures.
+struct Injections {
+    query: Query,
+    content: u32,
+    language: Option<u32>,
 }
 
 fn compiled(def: &'static LanguageDef) -> &'static Compiled {
@@ -70,7 +123,14 @@ fn compiled(def: &'static LanguageDef) -> &'static Compiled {
                 let language = Language::new(l.grammar);
                 let query = Query::new(&language, l.highlights)
                     .unwrap_or_else(|e| panic!("built-in highlights query for {}: {e}", l.name));
-                Compiled { language, query }
+                let injections = (!l.injections.is_empty()).then(|| {
+                    let query = Query::new(&language, l.injections)
+                        .unwrap_or_else(|e| panic!("built-in injections query for {}: {e}", l.name));
+                    let content = query.capture_index_for_name("injection.content").expect("@injection.content");
+                    let language = query.capture_index_for_name("injection.language");
+                    Injections { query, content, language }
+                });
+                Compiled { language, query, injections }
             })
             .collect()
     });
@@ -93,13 +153,23 @@ pub struct Syntax {
     expected_chars: usize,
     /// The last parse ran out of time: don't retry until the text changes.
     gave_up: bool,
+    /// The trees of the embedded code last highlighted.
+    injected: Mutex<InjectionCache>,
 }
 
 impl Syntax {
     pub fn new(language: &'static LanguageDef) -> Self {
         let mut parser = Parser::new();
         parser.set_language(&compiled(language).language).expect("grammar matches the tree-sitter version");
-        Self { language, parser, tree: None, stale: true, expected_chars: usize::MAX, gave_up: false }
+        Self {
+            language,
+            parser,
+            tree: None,
+            stale: true,
+            expected_chars: usize::MAX,
+            gave_up: false,
+            injected: Mutex::default(),
+        }
     }
 
     /// The tree as of the last `update` (`None` before the first parse, or
@@ -175,6 +245,10 @@ impl Syntax {
     /// Where captures overlap, the innermost node wins; for the same node,
     /// the first pattern in the query wins (tree-sitter's convention).
     /// Captures the theme has no color for leave the text as it is.
+    ///
+    /// Code in another language (a language's injections query finds it:
+    /// a Markdown code fence, Markdown paragraph text) is parsed on its own
+    /// and painted over its host's colors.
     pub fn highlight(&self, rope: &Rope, lines: Range<usize>, theme: &Theme) -> Vec<LineColors> {
         let last = rope.len_lines();
         let lines = lines.start.min(last)..lines.end.min(last);
@@ -183,36 +257,21 @@ impl Syntax {
         if lines.is_empty() {
             return out;
         }
-        let compiled = compiled(self.language);
-        let colors: Vec<Option<Rgba>> = compiled.query.capture_names().iter().map(|n| theme.syntax_color(n)).collect();
-
         let (first_char, end_char) = (rope.line_to_char(lines.start), rope.line_to_char(lines.end));
-        let (first_byte, end_byte) = (rope.char_to_byte(first_char), rope.char_to_byte(end_char));
-        let mut captures: Vec<(usize, usize, usize, u32)> = Vec::new();
-        let mut cursor = QueryCursor::new();
-        cursor.set_byte_range(first_byte..end_byte);
-        let text = |node: Node| rope.byte_slice(node.byte_range()).chunks().map(str::as_bytes);
-        let mut matches = cursor.matches(&compiled.query, tree.root_node(), text);
-        while let Some(m) = matches.next() {
-            for c in m.captures {
-                captures.push((c.node.start_byte(), c.node.end_byte(), m.pattern_index, c.index));
-            }
-        }
-        // Outer nodes first (so inner ones paint over them), then by pattern.
-        captures.sort_by_key(|&(s, e, p, _)| (s, std::cmp::Reverse(e), p));
-
-        let mut cells: Vec<Option<Rgba>> = vec![None; end_char - first_char];
-        let mut last_range = None;
-        for (s, e, _, capture) in captures {
-            if last_range == Some((s, e)) {
-                continue;
-            }
-            last_range = Some((s, e));
-            let Some(color) = colors[capture as usize] else { continue };
-            let (s, e) = (s.clamp(first_byte, end_byte), e.clamp(first_byte, end_byte));
-            let (cs, ce) = (rope.byte_to_char(s) - first_char, rope.byte_to_char(e) - first_char);
-            cells[cs..ce].fill(Some(color));
-        }
+        let mut painter = Painter {
+            host: rope,
+            first_char,
+            first_byte: rope.char_to_byte(first_char),
+            cells: vec![None; end_char - first_char],
+            theme,
+            cache: self.injected.lock().unwrap_or_else(|e| e.into_inner()),
+            used: Vec::new(),
+        };
+        let range = painter.first_byte..rope.char_to_byte(end_char);
+        painter.layer(self.language, tree, rope, 0, range, 0);
+        let Painter { cells, mut cache, used, .. } = painter;
+        cache.retain(|k, _| used.contains(k));
+        drop(cache);
 
         for (i, line) in lines.enumerate() {
             let start = rope.line_to_char(line) - first_char;
@@ -232,6 +291,122 @@ impl Syntax {
             }
         }
         out
+    }
+}
+
+/// Embedded code's trees, by language and text.
+type InjectionCache = HashMap<(&'static str, String), Tree>;
+
+/// Paints the colors of a range of the buffer, one language layer at a time.
+struct Painter<'a> {
+    host: &'a Rope,
+    /// Where the painted range starts in `host`.
+    first_char: usize,
+    first_byte: usize,
+    /// The color of each char of the range.
+    cells: Vec<Option<Rgba>>,
+    theme: &'a Theme,
+    cache: MutexGuard<'a, InjectionCache>,
+    /// The cache entries this highlight used (the others are dropped).
+    used: Vec<(&'static str, String)>,
+}
+
+impl Painter<'_> {
+    /// Paint `range` (bytes of `text`) from `tree`, the tree of `text` in
+    /// `language`. `text` starts at byte `base` of the buffer.
+    fn layer(
+        &mut self,
+        language: &'static LanguageDef,
+        tree: &Tree,
+        text: &Rope,
+        base: usize,
+        range: Range<usize>,
+        depth: usize,
+    ) {
+        let this = compiled(language);
+        let source = |node: Node| text.byte_slice(node.byte_range()).chunks().map(str::as_bytes);
+        let colors: Vec<Option<Rgba>> = this.query.capture_names().iter().map(|n| self.theme.syntax_color(n)).collect();
+
+        let mut captures: Vec<(usize, usize, usize, u32)> = Vec::new();
+        let mut cursor = QueryCursor::new();
+        cursor.set_byte_range(range.clone());
+        let mut matches = cursor.matches(&this.query, tree.root_node(), source);
+        while let Some(m) = matches.next() {
+            for c in m.captures {
+                captures.push((c.node.start_byte(), c.node.end_byte(), m.pattern_index, c.index));
+            }
+        }
+        // Outer nodes first (so inner ones paint over them), then by pattern.
+        captures.sort_by_key(|&(s, e, p, _)| (s, std::cmp::Reverse(e), p));
+        let mut last_range = None;
+        for (s, e, _, capture) in captures {
+            if last_range == Some((s, e)) {
+                continue;
+            }
+            last_range = Some((s, e));
+            if let Some(color) = colors[capture as usize] {
+                self.paint(base + s.clamp(range.start, range.end), base + e.clamp(range.start, range.end), color);
+            }
+        }
+
+        let Some(inj) = this.injections.as_ref().filter(|_| depth < MAX_INJECTION_DEPTH) else { return };
+        let mut embedded: Vec<(&'static LanguageDef, Range<usize>)> = Vec::new();
+        let mut cursor = QueryCursor::new();
+        cursor.set_byte_range(range.clone());
+        let mut matches = cursor.matches(&inj.query, tree.root_node(), source);
+        while let Some(m) = matches.next() {
+            let named = m.captures.iter().find(|c| Some(c.index) == inj.language).map(|c| {
+                let name: String = text.byte_slice(c.node.byte_range()).into();
+                // An info string can say more: `rust,ignore`, `{.python}`.
+                let name = name.trim_start_matches(['{', '.']).to_string();
+                name.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-' || c == '+'))
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
+            });
+            let set = || {
+                inj.query
+                    .property_settings(m.pattern_index)
+                    .iter()
+                    .find(|p| &*p.key == "injection.language")?
+                    .value
+                    .as_deref()
+                    .map(str::to_string)
+            };
+            let Some(lang) = named.or_else(set).as_deref().and_then(language_named) else { continue };
+            for c in m.captures.iter().filter(|c| c.index == inj.content) {
+                embedded.push((lang, c.node.byte_range()));
+            }
+        }
+        for (lang, content) in embedded {
+            let code: String = text.byte_slice(content.clone()).into();
+            let key = (lang.name, code);
+            if !self.cache.contains_key(&key) {
+                let mut parser = Parser::new();
+                if parser.set_language(&compiled(lang).language).is_err() {
+                    continue;
+                }
+                let Some(tree) = parser.parse(&key.1, None) else { continue };
+                self.cache.insert(key.clone(), tree);
+            }
+            let sub = Rope::from_str(&key.1);
+            let tree = self.cache[&key].clone();
+            self.used.push(key);
+            let inner = range.start.max(content.start) - content.start
+                ..range.end.min(content.end).max(content.start) - content.start;
+            if !inner.is_empty() {
+                self.layer(lang, &tree, &sub, base + content.start, inner, depth + 1);
+            }
+        }
+    }
+
+    /// Paint buffer bytes `start..end` (within the painted range).
+    fn paint(&mut self, start: usize, end: usize, color: Rgba) {
+        if start >= end {
+            return;
+        }
+        let (s, e) = (self.host.byte_to_char(start) - self.first_char, self.host.byte_to_char(end) - self.first_char);
+        self.cells[s..e].fill(Some(color));
     }
 }
 

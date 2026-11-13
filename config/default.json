@@ -82,7 +82,15 @@
       "syntax.escape": "#56b6c2",
       "syntax.operator": "#56b6c2",
       "syntax.string.special.key": "#e06c75",
-      "syntax.punctuation": "#abb2bf"
+      "syntax.punctuation": "#abb2bf",
+      "syntax.boolean": "#d19a66",
+      "syntax.punctuation.special": "#7f848e",
+      "syntax.text.title": "#61afef",
+      "syntax.text.literal": "#98c379",
+      "syntax.text.uri": "#e06c75",
+      "syntax.text.reference": "#e5c07b",
+      "syntax.text.emphasis": "#e06c75",
+      "syntax.text.strong": "#d19a66"
     },
     "ymacs-light": {
       "background": "#fafafa",
@@ -139,7 +147,15 @@
       "syntax.escape": "#0184bc",
       "syntax.operator": "#0184bc",
       "syntax.string.special.key": "#e45649",
-      "syntax.punctuation": "#4f525e"
+      "syntax.punctuation": "#4f525e",
+      "syntax.boolean": "#986801",
+      "syntax.punctuation.special": "#9da0a8",
+      "syntax.text.title": "#4078f2",
+      "syntax.text.literal": "#50a14f",
+      "syntax.text.uri": "#e45649",
+      "syntax.text.reference": "#c18401",
+      "syntax.text.emphasis": "#e45649",
+      "syntax.text.strong": "#986801"
     },
     "solarized-dark": {
       "background": "#002b36",
@@ -196,7 +212,15 @@
       "syntax.escape": "#dc322f",
       "syntax.operator": "#859900",
       "syntax.string.special.key": "#268bd2",
-      "syntax.punctuation": "#839496"
+      "syntax.punctuation": "#839496",
+      "syntax.boolean": "#d33682",
+      "syntax.punctuation.special": "#586e75",
+      "syntax.text.title": "#268bd2",
+      "syntax.text.literal": "#2aa198",
+      "syntax.text.uri": "#268bd2",
+      "syntax.text.reference": "#b58900",
+      "syntax.text.emphasis": "#cb4b16",
+      "syntax.text.strong": "#d33682"
     },
     "solarized-light": {
       "background": "#fdf6e3",
@@ -253,7 +277,15 @@
       "syntax.escape": "#dc322f",
       "syntax.operator": "#859900",
       "syntax.string.special.key": "#268bd2",
-      "syntax.punctuation": "#657b83"
+      "syntax.punctuation": "#657b83",
+      "syntax.boolean": "#d33682",
+      "syntax.punctuation.special": "#93a1a1",
+      "syntax.text.title": "#268bd2",
+      "syntax.text.literal": "#2aa198",
+      "syntax.text.uri": "#268bd2",
+      "syntax.text.reference": "#b58900",
+      "syntax.text.emphasis": "#cb4b16",
+      "syntax.text.strong": "#d33682"
     }
   },
   "modes": {
@@ -271,7 +303,8 @@
       "markdown-mode": {
         "lighter": "Markdown",
         "parent": "text-mode",
-        "files": ["*.md", "*.markdown"]
+        "files": ["*.md", "*.markdown"],
+        "syntax": "markdown"
       },
       "prog-mode": {
         "lighter": "Prog",
@@ -291,6 +324,50 @@
         "files": ["*.json", "*.jsonc", ".prettierrc", ".eslintrc"],
         "syntax": "json",
         "editor": { "tab_width": 2 }
+      },
+      "toml-mode": {
+        "lighter": "TOML",
+        "parent": "prog-mode",
+        "files": ["*.toml", "Cargo.lock", "Pipfile", "poetry.lock"],
+        "syntax": "toml",
+        "editor": { "tab_width": 2 }
+      },
+      "yaml-mode": {
+        "lighter": "YAML",
+        "parent": "prog-mode",
+        "files": ["*.yaml", "*.yml", ".clang-format"],
+        "syntax": "yaml",
+        "editor": { "tab_width": 2 }
+      },
+      "sh-mode": {
+        "lighter": "Shell",
+        "parent": "prog-mode",
+        "files": ["*.sh", "*.bash", "*.zsh", ".bashrc", ".bash_profile", ".profile", ".zshrc", ".zprofile", ".zshenv", "PKGBUILD"],
+        "interpreters": ["sh", "bash", "zsh", "dash", "ksh"],
+        "syntax": "bash",
+        "editor": { "tab_width": 2 }
+      },
+      "python-mode": {
+        "lighter": "Python",
+        "parent": "prog-mode",
+        "files": ["*.py", "*.pyi", "*.pyw", "SConstruct", "SConscript"],
+        "interpreters": ["python", "python3", "python2"],
+        "syntax": "python",
+        "editor": { "fill_column": 88, "tab_width": 4 }
+      },
+      "scheme-mode": {
+        "lighter": "Scheme",
+        "parent": "lisp-mode",
+        "files": ["*.scm", "*.ss", "*.sld", "*.sls", "*.rkt"],
+        "interpreters": ["guile", "racket", "chez", "scheme", "steel"],
+        "syntax": "scheme"
+      },
+      "emacs-lisp-mode": {
+        "lighter": "ELisp",
+        "parent": "lisp-mode",
+        "files": ["*.el", ".emacs", "_emacs"],
+        "interpreters": ["emacs"],
+        "syntax": "elisp"
       },
       "dired-mode": {
         "lighter": "Dired",
@@ -328,8 +405,8 @@
       "lisp-mode": {
         "lighter": "Lisp",
         "parent": "prog-mode",
-        "files": ["*.lisp", "*.lsp", "*.cl", "*.el", "*.scm", "*.ss", "*.rkt", "*.clj", "*.edn"],
-        "interpreters": ["sbcl", "clisp", "guile", "racket", "steel", "emacs"],
+        "files": ["*.lisp", "*.lsp", "*.cl", "*.clj", "*.edn"],
+        "interpreters": ["sbcl", "clisp"],
         "editor": { "tab_width": 2 }
       }
     },

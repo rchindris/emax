@@ -582,10 +582,11 @@ fn major_mode_selection() {
     assert_eq!(file("notes.md", "").ed.major_mode(), "markdown-mode");
     assert_eq!(file("README", "").ed.major_mode(), "text-mode");
     assert_eq!(file("data.json", "").ed.major_mode(), "json-mode");
-    assert_eq!(file("Cargo.lock", "").ed.major_mode(), "fundamental-mode");
+    assert_eq!(file("Cargo.lock", "").ed.major_mode(), "toml-mode");
+    assert_eq!(file("notes.txt", "").ed.major_mode(), "text-mode");
     // A marker beats the file name; a shebang beats it too.
     assert_eq!(file("main.rs", "// -*- mode: lisp -*-\n").ed.major_mode(), "lisp-mode");
-    assert_eq!(file("script", "#!/usr/bin/env steel\n").ed.major_mode(), "lisp-mode");
+    assert_eq!(file("script", "#!/usr/bin/env steel\n").ed.major_mode(), "scheme-mode");
     assert_eq!(file("script", "#!/usr/bin/env sbcl\n;; -*- text -*-\n").ed.major_mode(), "text-mode");
     // An unknown marker falls through to the file name.
     assert_eq!(file("main.rs", "// -*- cobol -*-\n").ed.major_mode(), "rust-mode");
