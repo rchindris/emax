@@ -1,5 +1,4 @@
 use super::*;
-use crate::engine::config::DEFAULT_JSON;
 use crate::engine::{Buffer, Config};
 
 fn theme() -> Theme {
@@ -135,12 +134,12 @@ fn modes_choose_the_language() {
 
 #[test]
 fn syntax_is_inherited_and_checked_in_the_config() {
-    let user = r#"{ "modes": { "major": {
-        "my-rust-mode": { "parent": "rust-mode" },
-        "plain-rust-mode": { "parent": "rust-mode", "syntax": "" },
-        "cobol-mode": { "syntax": "cobol" }
-    } } }"#;
-    let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", user)]);
+    let user = r#"
+        (define-major-mode 'my-rust-mode #:parent 'rust-mode)
+        (define-major-mode 'plain-rust-mode #:parent 'rust-mode #:syntax #f)
+        (define-major-mode 'cobol-mode #:syntax 'cobol)
+    "#;
+    let c = Config::with_user(user);
     assert_eq!(c.warnings.len(), 1, "{:#?}", c.warnings);
     assert!(c.warnings[0].contains("unknown language \"cobol\""), "{}", c.warnings[0]);
     let m = &c.modes;
@@ -158,15 +157,15 @@ fn theme_syntax_colors_fall_back_and_merge() {
     assert_eq!(t.syntax_color("function.method"), t.syntax_color("function"));
     assert_eq!(t.syntax_color("keyword.control.flow"), t.syntax_color("keyword"));
     assert_eq!(t.syntax_color("nothing.like.this"), None);
-    let user = r##"{ "themes": { "ymacs-dark": { "syntax.keyword": "#ff0000", "syntax.function.method": "#00ff00", "syntax.oops": "red" } } }"##;
-    let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", user)]);
+    let user = r##"(define-theme 'ymacs-dark #:syntax.keyword "#ff0000" #:syntax.function.method "#00ff00" #:syntax.oops "red")"##;
+    let c = Config::with_user(user);
     assert!(c.warnings.iter().any(|w| w.contains("syntax.oops")), "{:#?}", c.warnings);
     let u = &c.appearance.themes.dark;
     assert_eq!(u.syntax_color("keyword"), Some(0xff0000ff));
     assert_eq!(u.syntax_color("function.method"), Some(0x00ff00ff));
     assert_eq!(u.syntax_color("function"), t.syntax_color("function")); // untouched
     // Every built-in theme colors the common captures.
-    let raw: serde_json::Value = serde_json::from_str(DEFAULT_JSON).unwrap();
+    let raw = crate::engine::config::eval::document([crate::engine::config::builtin_layer()]);
     for (name, theme) in raw["themes"].as_object().unwrap() {
         for capture in ["keyword", "string", "comment", "function", "type", "constant"] {
             assert!(theme.get(format!("syntax.{capture}")).is_some(), "{name} has no syntax.{capture}");

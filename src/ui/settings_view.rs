@@ -73,15 +73,17 @@ impl YmacsView {
         }
     }
 
-    /// After a buffer was saved: if it is the settings file, apply it (like
-    /// saving settings.json in VS Code).
+    /// After a buffer was saved: if it is the init or settings file, apply
+    /// it (like saving settings.json in VS Code).
     pub(super) fn after_save(&mut self) {
         let Some(user) = config::user_config_path() else { return };
-        let same = |p: &std::path::Path| match (p.canonicalize(), user.canonicalize()) {
+        let same = |p: &std::path::Path, q: &std::path::Path| match (p.canonicalize(), q.canonicalize()) {
             (Ok(a), Ok(b)) => a == b,
-            _ => p == user,
+            _ => p == q,
         };
-        if self.ed.buf.path.as_deref().is_some_and(same) && !self.ed.buf.modified() {
+        let settings = config::settings_path(&user);
+        let ours = |p: &std::path::Path| same(p, &user) || same(p, &settings);
+        if self.ed.buf.path.as_deref().is_some_and(ours) && !self.ed.buf.modified() {
             let problem = self.reload_config(Some(user));
             self.ed.message = Some(problem.unwrap_or_else(|| "Settings applied".into()));
             self.echo = self.ed.message.clone().map(Into::into);
@@ -107,8 +109,8 @@ impl YmacsView {
             .pb_2()
             .child(div().text_size(self.ui(20.0)).text_color(rgba(t.emphasis)).child("Settings"))
             .child(div().flex_1())
-            .child(self.button("open-json", "{ }  Open settings.json", t).on_click(cx.listener(|this, _, _, cx| {
-                this.ed.settings_action("settings-open-json");
+            .child(self.button("open-init", "Open init.scm", t).on_click(cx.listener(|this, _, _, cx| {
+                this.ed.settings_action("settings-open-init-file");
                 this.after_settings(false, cx);
             })))
             .child(self.button("close-settings", "✕", t).on_click(cx.listener(|this, _, _, cx| {
@@ -552,7 +554,7 @@ impl YmacsView {
                 ("settings-previous", "prev"),
                 ("settings-next-section", "section"),
                 ("settings-reset", if modified { "reset" } else { "" }),
-                ("settings-open-json", "edit JSON"),
+                ("settings-open-init-file", "edit init.scm"),
                 ("settings-quit", if s.query.is_empty() { "close" } else { "clear" }),
             ],
         };

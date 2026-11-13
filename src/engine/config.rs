@@ -1,38 +1,38 @@
-//! Configuration: editor settings and keymaps, read from JSON.
+//! Configuration: editor settings, keymaps, modes and themes, written in
+//! Steel (Scheme).
 //!
-//! The built-in defaults live in `config/default.json` (compiled into the
-//! binary). A user file, if present, is layered on top of them:
+//! The built-in defaults live in `config/default.scm` (compiled into the
+//! binary). The user's files, if present, run after them, in this order:
 //!
-//! - `$YMACS_CONFIG`, or
-//! - `$XDG_CONFIG_HOME/ymacs/config.json`, or
-//! - on Windows, `%APPDATA%\ymacs\config.json`, or
-//! - `~/.config/ymacs/config.json`.
+//! 1. `init.scm`, written by the user: `$YMACS_CONFIG`, else
+//!    `$XDG_CONFIG_HOME/ymacs/init.scm`, else on Windows
+//!    `%APPDATA%\ymacs\init.scm`, else `~/.config/ymacs/init.scm`;
+//! 2. `settings.scm` next to it, written by the settings editor.
 //!
-//! The user file only needs what it changes. Settings replace the defaults;
-//! keymap entries are added to the default keymaps, replacing a binding for
-//! the same keys, and an entry set to `null` removes a default binding:
+//! A file only needs what it changes. Options replace the defaults; key
+//! bindings are added to the keymaps, replacing a binding for the same keys,
+//! and binding keys to `#f` removes a default binding:
 //!
-//! ```json
-//! {
-//!   "editor": { "fill_column": 80 },
-//!   "keymaps": { "global": { "C-z": "undo", "C-x C-c": null } }
-//! }
+//! ```scheme
+//! (setq fill-column 80)
+//! (global-set-key "C-z" 'undo)
+//! (global-unset-key "C-x C-c")
 //! ```
 //!
-//! `modes` defines major modes and configures minor modes (see
-//! [`super::modes`]). A user entry for an existing mode is merged into it
-//! field by field; its keymap is merged like the keymaps above.
+//! [`eval`] has the forms. `define-major-mode` defines major modes and
+//! `define-minor-mode` configures minor modes (see [`super::modes`]); for a
+//! mode that exists, only the properties given change. `define-theme` is
+//! merged color by color into the theme of the same name (see
+//! [`super::theme`]).
 //!
-//! `font`, `theme` and `themes` set the look (see [`super::theme`]); a user
-//! theme entry is merged color by color into the theme of the same name.
-//!
-//! `terminal` configures terminal buffers and the PTY backend, `session`
-//! session persistence (both merged field by field). The `terminal` keymap
+//! Under the forms, each file is a list of patches to a JSON-shaped document
+//! (the shape [`RawConfig`] reads), applied in order. The `terminal` keymap
 //! holds the keys of terminal buffers (sequences starting with one of
-//! `terminal.escape_keys` in char mode; any key in copy mode).
+//! `terminal-escape-keys` in char mode; any key in copy mode).
 //!
-//! Problems (bad JSON, unknown commands, malformed keys) never stop the
-//! editor: the offending entry is skipped and reported in `warnings`.
+//! Problems (Scheme errors, unknown commands, malformed keys) never stop the
+//! editor: the offending entry is skipped and reported in `warnings`; a
+//! Scheme error skips the rest of its file.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -50,8 +50,15 @@ use super::settings::SETTINGS_ACTIONS;
 use super::syntax;
 use super::theme::{self, DEFAULT_THEME, Fonts, RawThemes, Theme, Themes};
 
+pub mod eval;
+
+pub use eval::{Layer, OPTIONS, OptionDef, option};
+
 /// The built-in configuration.
-pub const DEFAULT_JSON: &str = include_str!("../../config/default.json");
+pub const DEFAULT_SCM: &str = include_str!("../../config/default.scm");
+
+/// The name of the settings editor's file, next to `init.scm`.
+pub const SETTINGS_FILE: &str = "settings.scm";
 
 /// The keymaps a configuration can define.
 pub const KEYMAP_NAMES: [&str; 5] = ["global", "picker", "search", "settings", "terminal"];
@@ -324,35 +331,64 @@ pub struct Config {
 impl Config {
     /// Only the built-in configuration.
     pub fn builtin() -> Self {
-        Self::from_layers(&[("built-in config", DEFAULT_JSON)])
+        Self::from_evaluated(&[builtin_layer()])
     }
 
-    /// The built-in configuration plus the user's file, if there is one.
+    /// The built-in configuration plus the user's files, if there are any.
     pub fn load() -> Self {
         Self::load_from(user_config_path())
     }
 
-    /// The built-in configuration plus the file at `path`, if it exists.
-    pub fn load_from(path: Option<PathBuf>) -> Self {
-        let Some(path) = path else { return Self::builtin() };
-        match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                let label = path.display().to_string();
-                let mut c = Self::from_layers(&[("built-in config", DEFAULT_JSON), (&label, &text)]);
-                c.user_file = Some(path);
-                c
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::builtin(),
-            Err(e) => {
-                let mut c = Self::builtin();
-                c.warnings.push(format!("{}: {e}", path.display()));
-                c
+    /// The built-in configuration plus the init file at `init` and the
+    /// settings file next to it, those that exist.
+    pub fn load_from(init: Option<PathBuf>) -> Self {
+        let Some(init) = init else { return Self::builtin() };
+        let mut user = Vec::new();
+        let mut problems = Vec::new();
+        let mut user_file = None;
+        for path in [init.clone(), settings_path(&init)] {
+            match read_layer(&path) {
+                Ok(Some(l)) => {
+                    user.push(l);
+                    if path == init {
+                        user_file = Some(init.clone());
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => problems.push(e),
             }
         }
+        if let Some(old) = init.parent().map(|d| d.join("config.json")).filter(|p| p.exists()) {
+            problems.push(format!(
+                "{}: JSON configuration is no longer read; move it to {} (see the README)",
+                super::files::abbreviate(&old),
+                super::files::abbreviate(&init)
+            ));
+        }
+        let mut layers = vec![builtin_layer()];
+        layers.extend(&user);
+        let mut c = Self::from_evaluated(&layers);
+        c.user_file = user_file;
+        c.warnings.splice(0..0, problems);
+        c
     }
 
-    /// Merge JSON layers in order (later layers override earlier ones).
+    /// The built-in configuration plus `src` (a user file's text), for tests.
+    pub fn with_user(src: &str) -> Self {
+        Self::from_layers(&[("user", src)])
+    }
+
+    /// The built-in configuration plus each `(label, source)` in order (later
+    /// layers override earlier ones).
     pub fn from_layers(layers: &[(&str, &str)]) -> Self {
+        let user: Vec<Layer> = layers.iter().map(|(label, src)| eval::eval(label, src, None)).collect();
+        let mut all = vec![builtin_layer()];
+        all.extend(&user);
+        Self::from_evaluated(&all)
+    }
+
+    /// Apply evaluated layers in order.
+    pub fn from_evaluated(layers: &[&Layer]) -> Self {
         let mut warnings = Vec::new();
         let mut settings = Settings::default();
         let (mut family, mut ui_family) = ("monospace".to_string(), "system-ui".to_string());
@@ -366,11 +402,15 @@ impl Config {
         let mut terminal = TerminalConfig::default();
         let mut session = SessionConfig::default();
 
-        for (label, text) in layers {
-            let raw: RawConfig = match serde_json::from_str(text) {
+        for layer in layers {
+            warnings.extend(layer.warnings.iter().cloned());
+        }
+        let patches = layers.iter().flat_map(|l| l.patches.iter().map(move |p| (l.label.as_str(), p)));
+        for (label, patch) in patches {
+            let raw = match RawConfig::deserialize(&patch.value) {
                 Ok(r) => r,
                 Err(e) => {
-                    warnings.push(format!("{label}: {e} (file ignored)"));
+                    warnings.push(format!("{label}: {}: {e}", patch.what));
                     continue;
                 }
             };
@@ -538,12 +578,42 @@ fn merge_terminal(t: &mut TerminalConfig, raw: RawTerminal, label: &str, warning
     }
 }
 
+/// The built-in configuration, evaluated once.
+pub fn builtin_layer() -> &'static Layer {
+    static BUILTIN: OnceLock<Layer> = OnceLock::new();
+    BUILTIN.get_or_init(|| {
+        let l = eval::eval("built-in config", DEFAULT_SCM, None);
+        assert!(!l.failed, "built-in config: {:#?}", l.warnings);
+        l
+    })
+}
+
+/// The built-in themes as they are written (before inheriting).
+fn builtin_raw_themes() -> RawThemes {
+    let doc = eval::document([builtin_layer()]);
+    RawThemes::deserialize(&doc["themes"]).expect("built-in themes are well-formed")
+}
+
 /// The default theme exactly as the built-in configuration defines it: the
 /// base for themes that don't name one to inherit.
 fn builtin_default_theme() -> Theme {
-    let raw: RawConfig = serde_json::from_str(DEFAULT_JSON).expect("built-in config is valid JSON");
-    Theme::complete(DEFAULT_THEME, &raw.themes[DEFAULT_THEME])
-        .unwrap_or_else(|e| panic!("built-in {DEFAULT_THEME}: {e}"))
+    static THEME: OnceLock<Theme> = OnceLock::new();
+    THEME
+        .get_or_init(|| {
+            Theme::complete(DEFAULT_THEME, &builtin_raw_themes()[DEFAULT_THEME])
+                .unwrap_or_else(|e| panic!("built-in {DEFAULT_THEME}: {e}"))
+        })
+        .clone()
+}
+
+/// Evaluate the file at `path`: `None` if it doesn't exist.
+pub(crate) fn read_layer(path: &std::path::Path) -> Result<Option<Layer>, String> {
+    let label = super::files::abbreviate(path);
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(eval::eval(&label, &text, Some(path)))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{label}: {e}")),
+    }
 }
 
 fn resolve_global(name: &str) -> Option<&'static str> {
@@ -802,7 +872,12 @@ fn is_key_name(name: &str) -> bool {
         || (name.len() > 2 && name.starts_with('<') && name.ends_with('>'))
 }
 
-/// Where the user's configuration file is read from.
+/// The settings editor's file that goes with the init file at `init`.
+pub fn settings_path(init: &std::path::Path) -> PathBuf {
+    init.with_file_name(SETTINGS_FILE)
+}
+
+/// Where the user's init file is read from.
 pub fn user_config_path() -> Option<PathBuf> {
     user_config_path_in(&|name| std::env::var_os(name), cfg!(windows))
 }
@@ -815,7 +890,7 @@ fn user_config_path_in(env: &dyn Fn(&str) -> Option<std::ffi::OsString>, windows
     let base = var("XDG_CONFIG_HOME")
         .or_else(|| if windows { var("APPDATA") } else { None })
         .or_else(|| var("HOME").map(|h| h.join(".config")))?;
-    Some(base.join("ymacs").join("config.json"))
+    Some(base.join("ymacs").join("init.scm"))
 }
 
 #[cfg(test)]
@@ -840,13 +915,13 @@ mod tests {
 
     #[test]
     fn terminal_and_session_sections() {
-        let user = r#"{
-            "terminal": { "shell": "/bin/zsh", "shell_args": ["-l"], "backend": "local", "scrollback_lines": 500,
-                          "escape_keys": ["C-x", "M-C-z"], "socket": "/tmp/s.sock" },
-            "session": { "restore_session": false, "state_dir": "/tmp/state" },
-            "keymaps": { "terminal": { "C-c C-j": null, "C-c j": "term-copy-mode" } }
-        }"#;
-        let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", user)]);
+        let user = r#"
+            (setq terminal-shell "/bin/zsh" terminal-shell-args '("-l") terminal-backend 'local
+                  terminal-scrollback-lines 500 terminal-escape-keys '("C-x" "M-C-z") terminal-socket "/tmp/s.sock"
+                  restore-session #f session-state-dir "/tmp/state")
+            (define-keys 'terminal "C-c C-j" #f "C-c j" 'term-copy-mode)
+        "#;
+        let c = Config::with_user(user);
         assert!(c.warnings.is_empty(), "{:#?}", c.warnings);
         let t = &c.terminal;
         assert_eq!(t.shell_program(), "/bin/zsh");
@@ -860,17 +935,14 @@ mod tests {
         assert_eq!(t.keymap.lookup(&["C-c".into(), "j".into()]), Some("term-copy-mode"));
         assert_eq!(c.session, SessionConfig { restore_session: false, state_dir: Some("/tmp/state".into()) });
 
-        // `null` goes back to the default.
-        let reset = Config::from_layers(&[
-            ("built-in", DEFAULT_JSON),
-            ("a", user),
-            ("b", r#"{"terminal": {"shell": null, "socket": null}}"#),
-        ]);
+        // #f goes back to the default.
+        let reset = Config::from_layers(&[("a", user), ("b", "(setq terminal-shell #f terminal-socket #f)")]);
         assert_eq!(reset.terminal.shell, None);
         assert_eq!(reset.terminal.socket, None);
 
-        let bad = r#"{ "terminal": { "backend": "ssh", "escape_keys": ["C-x C-y", "Ctrl-q"], "term": "", "replay_bytes": 999999999999 } }"#;
-        let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", bad)]);
+        let bad = r#"(setq terminal-backend 'ssh terminal-escape-keys '("C-x C-y" "Ctrl-q") terminal-term ""
+                            terminal-replay-bytes 999999999999)"#;
+        let c = Config::with_user(bad);
         let w = c.warnings.join("\n");
         assert!(w.contains("terminal.backend"), "{w}");
         assert!(w.contains("only single keys can be escape keys"), "{w}");
@@ -885,18 +957,15 @@ mod tests {
     fn daemon_idle_exit() {
         use std::time::Duration;
         assert_eq!(Config::builtin().terminal.daemon_idle_exit, Some(Duration::from_secs(60)));
-        let c =
-            Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", r#"{"terminal": {"daemon_idle_exit": 5}}"#)]);
+        let c = Config::with_user("(setq terminal-daemon-idle-exit 5)");
         assert!(c.warnings.is_empty(), "{:#?}", c.warnings);
         assert_eq!(c.terminal.daemon_idle_exit, Some(Duration::from_secs(5)));
         // 0: never exit.
-        let c =
-            Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", r#"{"terminal": {"daemon_idle_exit": 0}}"#)]);
+        let c = Config::with_user("(setq terminal-daemon-idle-exit 0)");
         assert_eq!(c.terminal.daemon_idle_exit, None);
-        // Not a number of seconds: the layer is reported.
-        let c =
-            Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", r#"{"terminal": {"daemon_idle_exit": -3}}"#)]);
-        assert!(!c.warnings.is_empty());
+        // Not a number of seconds: the entry is reported.
+        let c = Config::with_user("(setq terminal-daemon-idle-exit -3)");
+        assert!(c.warnings.iter().any(|w| w.contains("(setq terminal-daemon-idle-exit)")), "{:#?}", c.warnings);
         assert_eq!(c.terminal.daemon_idle_exit, Some(Duration::from_secs(60)));
     }
 
@@ -916,14 +985,14 @@ mod tests {
 
     #[test]
     fn user_layer_overrides_adds_and_unbinds() {
-        let user = r#"{
-            "editor": { "fill_column": 80 },
-            "keymaps": {
-                "global": { "C-z": "undo", "C-x C-c": null, "M-C-f": "forward-word" },
-                "search": { "C-j": "search-accept" }
-            }
-        }"#;
-        let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", user)]);
+        let user = r#"
+            (setq fill-column 80)
+            (global-set-key "C-z" 'undo)
+            (global-unset-key "C-x C-c")
+            (define-key 'global "M-C-f" 'forward-word)
+            (define-key 'search "C-j" 'search-accept)
+        "#;
+        let c = Config::with_user(user);
         assert!(c.warnings.is_empty(), "{:#?}", c.warnings);
         assert_eq!(c.modes.settings, Settings { fill_column: 80, tab_width: 4 });
         let g = &c.modes.global;
@@ -936,14 +1005,12 @@ mod tests {
 
     #[test]
     fn problems_are_reported_and_skipped() {
-        let user = r#"{
-            "keymaps": {
-                "global": { "C-z": "no-such-command", "Ctrl-x": "undo", "C-t": "undo" },
-                "search": { "C-x C-x": "search-accept" },
-                "minibuffer": {}
-            }
-        }"#;
-        let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", user)]);
+        let user = r#"
+            (define-keys 'global "C-z" 'no-such-command "Ctrl-x" 'undo "C-t" 'undo)
+            (define-keys 'search "C-x C-x" 'search-accept)
+            (define-keys 'minibuffer)
+        "#;
+        let c = Config::with_user(user);
         let w = c.warnings.join("\n");
         assert!(w.contains("unknown command \"no-such-command\""), "{w}");
         assert!(w.contains("\"Ctrl-x\" is not a key"), "{w}");
@@ -951,9 +1018,15 @@ mod tests {
         assert!(w.contains("unknown keymap \"minibuffer\""), "{w}");
         assert_eq!(c.modes.global.lookup(&["C-t".into()]), Some("undo")); // valid entries still apply
 
-        let broken = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", "{ not json")]);
-        assert!(broken.warnings[0].starts_with("user:"));
+        // A Scheme error skips the rest of the file, keeping what ran before it.
+        let broken =
+            Config::with_user("(global-set-key \"C-z\" 'undo)\n(setq fill-column (car 5))\n(setq tab-width 8)");
+        assert!(broken.warnings[0].starts_with("user:2:"), "{:#?}", broken.warnings);
+        assert_eq!(broken.modes.global.lookup(&["C-z".into()]), Some("undo"));
+        assert_eq!(broken.modes.settings.tab_width, 4);
         assert_eq!(broken.modes.global.lookup(&["C-f".into()]), Some("forward-char"));
+        let unclosed = Config::with_user("(setq fill-column 80");
+        assert!(unclosed.warnings[0].starts_with("user:"), "{:#?}", unclosed.warnings);
     }
 
     #[test]
@@ -965,23 +1038,20 @@ mod tests {
         assert_eq!(a.themes.dark.background, 0x1e1f22ff);
         assert_eq!(a.themes.dark.overlay, 0x0b0c0f80);
         // The built-in light theme is complete on its own.
-        let raw: RawConfig = serde_json::from_str(DEFAULT_JSON).unwrap();
-        for (name, entries) in &raw.themes {
+        for (name, entries) in &builtin_raw_themes() {
             Theme::complete(name, entries).unwrap_or_else(|e| panic!("built-in theme {name}: {e}"));
         }
     }
 
     #[test]
     fn user_fonts_and_themes() {
-        let user = r##"{
-            "font": { "family": "Iosevka", "size": 16, "line_height": 1.25 },
-            "theme": { "light": "paper", "dark": "ymacs-dark" },
-            "themes": {
-                "ymacs-dark": { "cursor": "#ff0000" },
-                "paper": { "inherits": "ymacs-light", "background": "#fffff0" }
-            }
-        }"##;
-        let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", user)]);
+        let user = r##"
+            (setq font-family "Iosevka" font-size 16 line-height 1.25
+                  theme '((light . paper) (dark . ymacs-dark)))
+            (define-theme 'ymacs-dark #:cursor "#ff0000")
+            (define-theme 'paper #:inherits 'ymacs-light #:background "#fffff0")
+        "##;
+        let c = Config::with_user(user);
         assert!(c.warnings.is_empty(), "{:#?}", c.warnings);
         let a = &c.appearance;
         assert_eq!((a.fonts.family.as_str(), a.fonts.ui_family.as_str()), ("Iosevka", ".SystemUIFont"));
@@ -997,8 +1067,7 @@ mod tests {
 
     #[test]
     fn every_theme_is_available_by_name() {
-        let user = r##"{ "font": { "ui_size": 12 }, "themes": { "paper": { "inherits": "ymacs-light" } } }"##;
-        let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", user)]);
+        let c = Config::with_user("(setq font-ui-size 12) (define-theme 'paper #:inherits 'ymacs-light)");
         assert!(c.warnings.is_empty(), "{:#?}", c.warnings);
         let a = &c.appearance;
         let names: Vec<&str> = a.available.iter().map(|t| t.name.as_str()).collect();
@@ -1017,28 +1086,29 @@ mod tests {
             move |name: &str| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| std::ffi::OsString::from(v))
         };
         let all =
-            env(&[("YMACS_CONFIG", "/e.json"), ("XDG_CONFIG_HOME", "/xdg"), ("APPDATA", "C:/AppData"), ("HOME", "/h")]);
-        assert_eq!(user_config_path_in(&all, true), Some(PathBuf::from("/e.json")));
+            env(&[("YMACS_CONFIG", "/e.scm"), ("XDG_CONFIG_HOME", "/xdg"), ("APPDATA", "C:/AppData"), ("HOME", "/h")]);
+        assert_eq!(user_config_path_in(&all, true), Some(PathBuf::from("/e.scm")));
         let no_override = env(&[("XDG_CONFIG_HOME", "/xdg"), ("APPDATA", "C:/AppData"), ("HOME", "/h")]);
-        assert_eq!(user_config_path_in(&no_override, true), Some(PathBuf::from("/xdg/ymacs/config.json")));
+        assert_eq!(user_config_path_in(&no_override, true), Some(PathBuf::from("/xdg/ymacs/init.scm")));
         let windows = env(&[("APPDATA", "C:/AppData"), ("HOME", "/h")]);
-        assert_eq!(user_config_path_in(&windows, true), Some(PathBuf::from("C:/AppData/ymacs/config.json")));
-        assert_eq!(user_config_path_in(&windows, false), Some(PathBuf::from("/h/.config/ymacs/config.json")));
+        assert_eq!(user_config_path_in(&windows, true), Some(PathBuf::from("C:/AppData/ymacs/init.scm")));
+        assert_eq!(user_config_path_in(&windows, false), Some(PathBuf::from("/h/.config/ymacs/init.scm")));
+        assert_eq!(
+            settings_path(std::path::Path::new("/xdg/ymacs/init.scm")),
+            PathBuf::from("/xdg/ymacs/settings.scm")
+        );
         assert_eq!(user_config_path_in(&env(&[]), true), None);
     }
 
     #[test]
     fn theme_problems_are_reported_and_skipped() {
-        let user = r##"{
-            "font": { "size": 0, "line_height": 9 },
-            "theme": "mine",
-            "themes": {
-                "mine": { "background": "#123", "foreground": "blue", "sparkle": "#fff" },
-                "a": { "inherits": "b" },
-                "b": { "inherits": "a" }
-            }
-        }"##;
-        let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", user)]);
+        let user = r##"
+            (setq font-size 0 line-height 9 theme 'mine)
+            (define-theme 'mine #:background "#123" #:foreground "blue" #:sparkle "#fff")
+            (define-theme 'a #:inherits 'b)
+            (define-theme 'b #:inherits 'a)
+        "##;
+        let c = Config::with_user(user);
         let w = c.warnings.join("\n");
         assert!(w.contains("font.size"), "{w}");
         assert!(w.contains("font.line_height"), "{w}");
@@ -1050,12 +1120,10 @@ mod tests {
         assert_eq!(t.background, 0x112233ff);
         assert_eq!(t.foreground, builtin_default_theme().foreground);
 
-        let cyclic = Config::from_layers(&[
-            ("built-in", DEFAULT_JSON),
-            ("user", r#"{"theme": "a", "themes": {"a": {"inherits": "b"}, "b": {"inherits": "a"}}}"#),
-        ]);
+        let cyclic =
+            Config::with_user("(setq theme 'a) (define-theme 'a #:inherits 'b) (define-theme 'b #:inherits 'a)");
         assert!(cyclic.warnings.iter().any(|w| w.contains("cycle")), "{:#?}", cyclic.warnings);
-        let unknown = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", r#"{"theme": "nope"}"#)]);
+        let unknown = Config::with_user("(setq theme 'nope)");
         assert!(unknown.warnings.iter().any(|w| w.contains("unknown theme \"nope\"")), "{:#?}", unknown.warnings);
         assert_eq!(unknown.appearance.themes.dark, builtin_default_theme());
     }

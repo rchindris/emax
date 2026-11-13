@@ -714,18 +714,15 @@ fn auto_fill_breaks_lines() {
 
 #[test]
 fn mode_keymaps_layer_over_global() {
-    let user = r#"{
-        "modes": {
-            "major": {
-                "rust-mode": { "keymap": { "C-c C-f": "fill-paragraph", "C-f": "forward-word" } },
-                "prog-mode": { "keymap": { "C-c C-k": "kill-whole-line", "C-f": "end-of-buffer" } },
-                "go-mode": { "parent": "prog-mode", "files": ["*.go"], "editor": { "tab_width": 8 } }
-            },
-            "minor": { "overwrite-mode": { "lighter": "OVR", "keymap": { "C-f": "backward-char" } } }
-        },
-        "keymaps": { "global": { "C-c m": "go-mode" } }
-    }"#;
-    let c = Config::from_layers(&[("built-in", config::DEFAULT_JSON), ("user", user)]);
+    let user = r#"
+        (define-keys 'rust-mode "C-c C-f" 'fill-paragraph "C-f" 'forward-word)
+        (define-keys 'prog-mode "C-c C-k" 'kill-whole-line "C-f" 'end-of-buffer)
+        (define-major-mode 'go-mode #:parent 'prog-mode #:files '("*.go") #:tab-width 8)
+        (define-minor-mode 'overwrite-mode #:lighter "OVR")
+        (define-key 'overwrite-mode "C-f" 'backward-char)
+        (global-set-key "C-c m" 'go-mode)
+    "#;
+    let c = Config::with_user(user);
     assert!(c.warnings.is_empty(), "{:#?}", c.warnings);
     let mut x = file("main.rs", "|ab cd\nline");
     x.ed.set_modes(std::sync::Arc::new(c.modes));
@@ -745,21 +742,17 @@ fn mode_keymaps_layer_over_global() {
 
 #[test]
 fn modes_config_problems_are_reported() {
-    let user = r#"{
-        "modes": {
-            "default_major_mode": "nope-mode",
-            "major": {
-                "a-mode": { "parent": "b-mode" },
-                "b-mode": { "parent": "a-mode" },
-                "c-mode": { "parent": "missing-mode", "minor_modes": ["sparkle-mode"], "editor": { "tab_width": 0 } },
-                "badname": {},
-                "undo-mode": {},
-                "auto-fill-mode": {}
-            },
-            "minor": { "sparkle-mode": {} }
-        }
-    }"#;
-    let c = Config::from_layers(&[("built-in", config::DEFAULT_JSON), ("user", user)]);
+    let user = r#"
+        (setq default-major-mode 'nope-mode)
+        (define-major-mode 'a-mode #:parent 'b-mode)
+        (define-major-mode 'b-mode #:parent 'a-mode)
+        (define-major-mode 'c-mode #:parent 'missing-mode #:minor-modes '(sparkle-mode) #:tab-width 0)
+        (define-major-mode 'badname)
+        (define-major-mode 'undo-mode)
+        (define-major-mode 'auto-fill-mode)
+        (define-minor-mode 'sparkle-mode)
+    "#;
+    let c = Config::with_user(user);
     let w = c.warnings.join("\n");
     for needle in [
         "unknown major mode \"nope-mode\"",

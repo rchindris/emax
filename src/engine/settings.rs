@@ -1,19 +1,22 @@
 //! The settings editor (`open-settings`, `s-,`): a searchable list of the
 //! configuration's settings with a control for each, like VS Code's settings
-//! UI. It shows each setting's effective value (the user file's, else the
-//! built-in default), marks the ones the user file sets, and writes changes
-//! straight to the user file — only the keys the user changed, so the file
-//! stays a small diff on top of the defaults. The view reloads the
-//! configuration after each write so changes apply at once.
+//! UI. It shows each setting's effective value, marks the ones set here,
+//! and writes changes to its own file, `settings.scm` next to `init.scm`:
+//! one `(setq option value)` per setting changed, so the file stays a small
+//! diff on top of the rest. It is loaded after `init.scm`, so what is set
+//! here wins; the "default" of a setting is what the built-in configuration
+//! and `init.scm` give it. The view reloads the configuration after each
+//! write so changes apply at once.
 //!
-//! Keymaps, modes and theme colors have no controls here: `settings-open-json`
-//! opens the file itself for those.
+//! Keymaps, modes and theme colors have no controls here:
+//! `settings-open-init-file` opens `init.scm` for those.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
-use super::config::{DEFAULT_JSON, user_config_path};
+use super::config::eval::{self, get_path, remove_path, set_path};
+use super::config::{builtin_layer, read_layer, settings_path, user_config_path};
 use super::editor::Editor;
 use super::files::abbreviate;
 use super::keymap::{Key, Keymap};
@@ -36,7 +39,7 @@ pub const SETTINGS_ACTIONS: &[&str] = &[
     "settings-delete-word",
     "settings-clear",
     "settings-reset",
-    "settings-open-json",
+    "settings-open-init-file",
 ];
 
 /// The search term that keeps only settings the user file sets.
@@ -84,7 +87,7 @@ impl Kind {
 }
 
 pub struct Setting {
-    /// The dotted path in the configuration file, e.g. `editor.fill_column`.
+    /// The option's name, as `setq` sets it, e.g. `fill-column`.
     pub key: &'static str,
     pub section: &'static str,
     /// `Group: Name`; the view shows the group dimmed.
@@ -102,49 +105,49 @@ macro_rules! settings {
 }
 
 settings! {
-    "editor.fill_column", "Text Editor", "Editor: Fill Column", Kind::Int { min: 1, max: 10_000 },
+    "fill-column", "Text Editor", "Editor: Fill Column", Kind::Int { min: 1, max: 10_000 },
         "Column at which fill-paragraph (M-q) and auto-fill mode break lines. Major modes can override it.";
-    "editor.tab_width", "Text Editor", "Editor: Tab Width", Kind::Int { min: 1, max: 64 },
+    "tab-width", "Text Editor", "Editor: Tab Width", Kind::Int { min: 1, max: 64 },
         "Number of columns between tab stops. Major modes can override it.";
-    "modes.default_major_mode", "Text Editor", "Modes: Default Major Mode", Kind::MajorMode,
+    "default-major-mode", "Text Editor", "Modes: Default Major Mode", Kind::MajorMode,
         "Major mode for files that no file pattern, interpreter or mode marker assigns one to.";
-    "modes.initial_major_mode", "Text Editor", "Modes: Initial Major Mode", Kind::MajorMode,
+    "initial-major-mode", "Text Editor", "Modes: Initial Major Mode", Kind::MajorMode,
         "Major mode of the *scratch* buffer.";
 
-    "font.family", "Font", "Font: Family", Kind::Text { nullable: false, placeholder: "monospace" },
+    "font-family", "Font", "Font: Family", Kind::Text { nullable: false, placeholder: "monospace" },
         "Font of buffers and terminals. \"monospace\" picks the platform's monospace font.";
-    "font.ui_family", "Font", "Font: UI Family", Kind::Text { nullable: false, placeholder: "system-ui" },
+    "font-ui-family", "Font", "Font: UI Family", Kind::Text { nullable: false, placeholder: "system-ui" },
         "Font of panels, tabs and the mode line. \"system-ui\" picks the platform's interface font.";
-    "font.size", "Font", "Font: Size", Kind::Float { min: 4.0, max: 200.0 },
-        "Font size in pixels. Panels scale with it unless font.ui_size is set in the settings file.";
-    "font.line_height", "Font", "Font: Line Height", Kind::Float { min: 1.0, max: 4.0 },
+    "font-size", "Font", "Font: Size", Kind::Float { min: 4.0, max: 200.0 },
+        "Font size in pixels. Panels scale with it unless font-ui-size is set in init.scm.";
+    "line-height", "Font", "Font: Line Height", Kind::Float { min: 1.0, max: 4.0 },
         "Line height as a multiple of the font size.";
 
     "theme", "Appearance", "Theme", Kind::Theme,
-        "Color theme. Define new themes, or change single colors of a theme, under \"themes\" in the settings file.";
+        "Color theme. Define new themes, or change single colors of a theme, with define-theme in init.scm.";
 
-    "terminal.shell", "Terminal", "Terminal: Shell", Kind::Text { nullable: true, placeholder: "$SHELL, else /bin/sh" },
+    "terminal-shell", "Terminal", "Terminal: Shell", Kind::Text { nullable: true, placeholder: "$SHELL, else /bin/sh" },
         "Program a new terminal runs. Leave empty to use $SHELL.";
-    "terminal.shell_args", "Terminal", "Terminal: Shell Arguments", Kind::List,
+    "terminal-shell-args", "Terminal", "Terminal: Shell Arguments", Kind::List,
         "Arguments passed to the shell, separated by commas.";
-    "terminal.term", "Terminal", "Terminal: TERM", Kind::Text { nullable: false, placeholder: "xterm-256color" },
+    "terminal-term", "Terminal", "Terminal: TERM", Kind::Text { nullable: false, placeholder: "xterm-256color" },
         "Value of the TERM environment variable for terminal programs.";
-    "terminal.scrollback_lines", "Terminal", "Terminal: Scrollback Lines", Kind::Int { min: 0, max: 10_000_000 },
+    "terminal-scrollback-lines", "Terminal", "Terminal: Scrollback Lines", Kind::Int { min: 0, max: 10_000_000 },
         "Lines of history kept per terminal.";
-    "terminal.backend", "Terminal", "Terminal: Backend", Kind::Choice(&["daemon", "local"]),
+    "terminal-backend", "Terminal", "Terminal: Backend", Kind::Choice(&["daemon", "local"]),
         "daemon: terminal processes run in the session daemon and survive the editor. local: they run as children of the editor and end with it. Takes effect after a restart.";
-    "terminal.replay_bytes", "Terminal", "Terminal: Replay Bytes", Kind::Int { min: 0, max: 268_435_456 },
+    "terminal-replay-bytes", "Terminal", "Terminal: Replay Bytes", Kind::Int { min: 0, max: 268_435_456 },
         "Output the daemon keeps per terminal to redraw it when the editor reattaches, in bytes.";
-    "terminal.socket", "Terminal", "Terminal: Daemon Socket", Kind::Text { nullable: true, placeholder: "default location" },
+    "terminal-socket", "Terminal", "Terminal: Daemon Socket", Kind::Text { nullable: true, placeholder: "default location" },
         "Path of the session daemon's socket. Leave empty for the default ($YMACS_PTYD_SOCKET overrides both).";
-    "terminal.daemon_idle_exit", "Terminal", "Terminal: Daemon Idle Exit", Kind::Int { min: 0, max: 31_536_000 },
+    "terminal-daemon-idle-exit", "Terminal", "Terminal: Daemon Idle Exit", Kind::Int { min: 0, max: 31_536_000 },
         "Seconds the daemon waits with no terminals and no editor attached before it exits. 0: never.";
-    "terminal.escape_keys", "Terminal", "Terminal: Escape Keys", Kind::List,
+    "terminal-escape-keys", "Terminal", "Terminal: Escape Keys", Kind::List,
         "Keys that reach the editor instead of the program in char mode (Emacs notation, separated by commas), e.g. C-x, M-x.";
 
-    "session.restore_session", "Session", "Session: Restore Session", Kind::Bool,
+    "restore-session", "Session", "Session: Restore Session", Kind::Bool,
         "Save tabs, windows and buffers on quit and restore them when ymacs starts without files.";
-    "session.state_dir", "Session", "Session: State Directory", Kind::Text { nullable: true, placeholder: "platform default" },
+    "session-state-dir", "Session", "Session: State Directory", Kind::Text { nullable: true, placeholder: "platform default" },
         "Directory the session file is kept in. Takes effect after a restart.";
 }
 
@@ -166,12 +169,16 @@ pub enum Row {
 }
 
 pub struct SettingsEditor {
-    /// The user file changes go to (`None`: no home directory to put it in).
+    /// The user's init file (`None`: no home directory to put it in).
+    pub init: Option<PathBuf>,
+    /// The settings file changes go to, next to `init`.
     pub path: Option<PathBuf>,
+    /// The configuration without the settings file: built-in plus `init`.
     defaults: Value,
-    /// The user file's contents (an empty object if it doesn't exist).
+    /// What the settings file sets (an empty object if it doesn't exist).
     user: Value,
-    /// Why the user file can't be edited (it isn't a JSON object).
+    /// Why the settings file can't be rewritten (an error, or forms other
+    /// than `setq` that rewriting would lose).
     pub file_error: Option<String>,
     pub query: String,
     /// The cursor in `query`, as bytes after it (see `line_edit`).
@@ -191,21 +198,27 @@ pub struct SettingsEditor {
 }
 
 impl SettingsEditor {
-    /// A settings editor writing to `path`, reading its current contents.
-    pub fn new(path: Option<PathBuf>) -> Self {
-        let defaults: Value = serde_json::from_str(DEFAULT_JSON).expect("built-in config is valid JSON");
-        let (user, file_error) = match path.as_deref().map(std::fs::read_to_string) {
-            None => (Value::Object(Map::new()), Some("No settings file location ($HOME is not set)".into())),
-            Some(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => (Value::Object(Map::new()), None),
-            Some(Err(e)) => (Value::Object(Map::new()), Some(format!("Cannot read the settings file: {e}"))),
-            Some(Ok(text)) if text.trim().is_empty() => (Value::Object(Map::new()), None),
-            Some(Ok(text)) => match serde_json::from_str::<Value>(&text) {
-                Ok(v @ Value::Object(_)) => (v, None),
-                Ok(_) => (Value::Object(Map::new()), Some("The settings file is not a JSON object".into())),
-                Err(e) => (Value::Object(Map::new()), Some(format!("The settings file has an error: {e}"))),
-            },
+    /// A settings editor for the init file at `init`, reading it and the
+    /// settings file next to it.
+    pub fn new(init: Option<PathBuf>) -> Self {
+        let path = init.as_deref().map(settings_path);
+        let init_layer = init.as_deref().and_then(|p| read_layer(p).ok().flatten());
+        let defaults = eval::document(std::iter::once(builtin_layer()).chain(&init_layer));
+        let empty = || Value::Object(Map::new());
+        let (user, file_error) = match path.as_deref().map(read_layer) {
+            None => (empty(), Some("No settings file location ($HOME is not set)".into())),
+            Some(Err(e)) => (empty(), Some(format!("Cannot read the settings file: {e}"))),
+            Some(Ok(None)) => (empty(), None),
+            Some(Ok(Some(l))) if l.failed => {
+                (empty(), Some(format!("The settings file has an error: {}", l.warnings.last().unwrap())))
+            }
+            Some(Ok(Some(l))) if !l.only_options() => {
+                (empty(), Some("The settings file has forms other than (setq ...): move them to init.scm".into()))
+            }
+            Some(Ok(Some(l))) => (eval::document([&l]), None),
         };
         let mut s = Self {
+            init,
             path,
             defaults,
             user,
@@ -231,14 +244,14 @@ impl SettingsEditor {
 
     // ------------------------------------------------------------ values
 
-    /// The value the user file sets for `key`, if it sets one.
+    /// The value the settings file sets for option `key`, if it sets one.
     pub fn user_value(&self, key: &str) -> Option<&Value> {
-        get_path(&self.user, key)
+        get_path(&self.user, option_path(key))
     }
 
-    /// The built-in value of `key`.
+    /// The value of option `key` without the settings file.
     pub fn default_value(&self, key: &str) -> Option<&Value> {
-        get_path(&self.defaults, key)
+        get_path(&self.defaults, option_path(key))
     }
 
     /// The value in effect: the user's, else the default.
@@ -246,7 +259,7 @@ impl SettingsEditor {
         self.user_value(key).or_else(|| self.default_value(key)).cloned().unwrap_or(Value::Null)
     }
 
-    /// Whether the user file sets `key` (VS Code's "Modified").
+    /// Whether the settings file sets `key` (VS Code's "Modified").
     pub fn is_modified(&self, key: &str) -> bool {
         self.user_value(key).is_some()
     }
@@ -470,7 +483,7 @@ impl SettingsEditor {
         }
     }
 
-    /// Remove match `m`'s setting from the user file, back to the default.
+    /// Remove match `m`'s setting from the settings file, back to the default.
     pub fn reset(&mut self, m: usize) {
         self.select(m);
         self.edit = None;
@@ -509,19 +522,19 @@ impl SettingsEditor {
         }
     }
 
-    /// Set `key` in the user file (`None` removes it) and write the file.
+    /// Set option `key` in the settings file (`None` removes it) and write the file.
     fn write(&mut self, key: &str, value: Option<Value>) {
         if let Some(e) = &self.file_error {
-            self.message = Some(format!("{e} — open it with settings-open-json to fix it"));
+            self.message = Some(format!("{e} — open it with settings-open-init-file to fix it"));
             return;
         }
         let Some(path) = self.path.clone() else { return };
         let mut user = self.user.clone();
         match value {
-            Some(v) => set_path(&mut user, key, v),
-            None => remove_path(&mut user, key),
+            Some(v) => set_path(&mut user, option_path(key), v),
+            None => remove_path(&mut user, option_path(key)),
         }
-        match write_json(&path, &user) {
+        match write_atomically(&path, &eval::settings_source(&user)) {
             Ok(()) => {
                 self.user = user;
                 self.changed = true;
@@ -649,8 +662,8 @@ impl Editor {
 
     /// Run a settings action (one of `SETTINGS_ACTIONS`).
     pub fn settings_action(&mut self, action: &str) {
-        if action == "settings-open-json" {
-            return self.open_settings_json();
+        if action == "settings-open-init-file" {
+            return self.open_init_file();
         }
         // In a text field, the reset key kills to the end of the field instead.
         if action == "settings-reset"
@@ -664,20 +677,23 @@ impl Editor {
         }
     }
 
-    /// Close the settings editor and visit the settings file, creating it
-    /// (as an empty object) if it doesn't exist yet.
-    pub fn open_settings_json(&mut self) {
-        let path = match self.settings.take() {
-            Some(s) => s.path,
-            None => user_config_path(),
+    /// Close the settings editor and visit the init file, creating it if it
+    /// doesn't exist yet; or, when the settings file can't be rewritten,
+    /// visit that, to fix it.
+    pub fn open_init_file(&mut self) {
+        let (init, broken) = match self.settings.take() {
+            Some(s) => (s.init, s.path.filter(|_| s.file_error.is_some())),
+            None => (user_config_path(), None),
         };
-        let Some(path) = path else {
-            self.message = Some("No settings file location ($HOME is not set)".into());
+        let Some(path) = broken.or(init) else {
+            self.message = Some("No init file location ($HOME is not set)".into());
             return;
         };
         if !path.exists()
-            && let Err(e) =
-                path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&path, "{\n}\n"))
+            && let Err(e) = path
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::write(&path, INIT_TEMPLATE))
         {
             self.message = Some(format!("Cannot create {}: {e}", abbreviate(&path)));
             return;
@@ -688,52 +704,31 @@ impl Editor {
     }
 }
 
-// ---------------------------------------------------------------- JSON paths
+/// What a new init file starts with.
+const INIT_TEMPLATE: &str = "\
+;;; init.scm --- ymacs configuration (Steel Scheme). Saving it applies it.
+;;;
+;;; Only what you change goes here; `ymacs --print-default-config` prints
+;;; the built-in configuration, with every option, key binding, mode and
+;;; theme. For example:
+;;;
+;;;   (setq fill-column 80)
+;;;   (global-set-key \"C-z\" 'undo)
 
-fn get_path<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
-    key.split('.').try_fold(v, |v, k| v.as_object()?.get(k))
+";
+
+/// The document path of option `key`.
+fn option_path(key: &str) -> &'static str {
+    eval::option(key).unwrap_or_else(|| panic!("{key} is not an option")).path
 }
 
-/// Set `key`, creating (or replacing non-object) parents as needed.
-fn set_path(v: &mut Value, key: &str, value: Value) {
-    let mut cur = v;
-    let parts: Vec<&str> = key.split('.').collect();
-    for p in &parts[..parts.len() - 1] {
-        if !cur.as_object().is_some_and(|m| m.get(*p).is_some_and(Value::is_object)) {
-            cur.as_object_mut().expect("parent is an object").insert(p.to_string(), Value::Object(Map::new()));
-        }
-        cur = cur.as_object_mut().unwrap().get_mut(*p).unwrap();
-    }
-    cur.as_object_mut().expect("parent is an object").insert(parts[parts.len() - 1].to_string(), value);
-}
-
-/// Remove `key`, and any parent objects that become empty.
-fn remove_path(v: &mut Value, key: &str) {
-    fn go(v: &mut Value, parts: &[&str]) {
-        let Some(m) = v.as_object_mut() else { return };
-        if let [last] = parts {
-            m.shift_remove(*last);
-            return;
-        }
-        if let Some(child) = m.get_mut(parts[0]) {
-            go(child, &parts[1..]);
-            if child.as_object().is_some_and(Map::is_empty) {
-                m.shift_remove(parts[0]);
-            }
-        }
-    }
-    go(v, &key.split('.').collect::<Vec<_>>());
-}
-
-/// Write `v` to `path` pretty-printed, through a temporary file so a crash
-/// never leaves half a file.
-fn write_json(path: &Path, v: &Value) -> std::io::Result<()> {
+/// Write `text` to `path` through a temporary file, so a crash never leaves
+/// half a file.
+fn write_atomically(path: &Path, text: &str) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let mut text = serde_json::to_string_pretty(v).map_err(std::io::Error::other)?;
-    text.push('\n');
-    let tmp = path.with_extension("json.tmp");
+    let tmp = path.with_extension("scm.tmp");
     std::fs::write(&tmp, text)?;
     std::fs::rename(&tmp, path)
 }
@@ -749,7 +744,7 @@ fn display_value(v: &Value) -> String {
     }
 }
 
-/// Check what was typed into a setting's field and turn it into its JSON value.
+/// Check what was typed into a setting's field and turn it into its value.
 pub fn parse_input(kind: &Kind, input: &str) -> Result<Value, String> {
     let t = input.trim();
     match *kind {

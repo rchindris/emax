@@ -17,7 +17,7 @@ const SCRATCH: &str = ";; This buffer is for text that is not saved.
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--print-default-config") {
-        print!("{}", config::DEFAULT_JSON);
+        print!("{}", config::DEFAULT_SCM);
         return;
     }
     // The session daemon that keeps terminal processes alive across editor runs.
@@ -26,7 +26,11 @@ fn main() {
     }
     let paths: Vec<PathBuf> = args.iter().map(PathBuf::from).collect();
     let t_open = Instant::now();
-    let config = Config::load();
+    // Evaluating the configuration starts a Steel engine (~100 ms): do it
+    // while the platform application starts up.
+    let loading = std::thread::spawn(Config::load);
+    let app = Application::new();
+    let config = loading.join().unwrap_or_else(|_| Config::builtin());
     for w in &config.warnings {
         eprintln!("ymacs: config: {w}");
     }
@@ -65,7 +69,7 @@ fn main() {
     let appearance = config.appearance;
     ed.themes = appearance.available.iter().map(|t| (t.name.clone(), t.is_dark())).collect();
 
-    Application::new().run(move |cx: &mut App| {
+    app.run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1100.0), px(760.0)), cx);
         let window = cx
             .open_window(

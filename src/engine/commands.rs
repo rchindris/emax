@@ -163,7 +163,7 @@ commands! {
     "save-buffers-kill-terminal" => quit, NO_UNDO, "Exit (asks for a second press if the buffer is modified).";
     "execute-extended-command" => execute_extended, NO_UNDO, "Pick a command by name (fuzzy) and run it.";
     "open-settings" => open_settings, NO_UNDO, "Edit the settings in a searchable list; changes are saved to the settings file and apply at once.";
-    "open-settings-json" => open_settings_json, NO_UNDO, "Visit the settings file (created if it doesn't exist); saving it applies it.";
+    "open-init-file" => open_init_file, NO_UNDO, "Visit the init file, init.scm (created if it doesn't exist); saving it applies it.";
     "load-theme" => load_theme, NO_UNDO, "Pick a theme (fuzzy), previewed as you move; RET keeps it for this session.";
 
     // minor modes (major mode commands come from the configuration)
@@ -1530,8 +1530,8 @@ fn open_settings(ed: &mut Editor, _: &Args) -> CmdResult {
     Ok(())
 }
 
-fn open_settings_json(ed: &mut Editor, _: &Args) -> CmdResult {
-    ed.open_settings_json();
+fn open_init_file(ed: &mut Editor, _: &Args) -> CmdResult {
+    ed.open_init_file();
     Ok(())
 }
 

@@ -2,16 +2,30 @@ use super::*;
 use crate::engine::testutil::temp_dir;
 use crate::engine::{Buffer, Config, Keymaps};
 
-/// An editor with the settings editor open on `file` in a fresh directory
-/// (written first if `contents` is given).
-fn open(contents: Option<&str>) -> (Editor, Keymap, PathBuf) {
-    let path = temp_dir("settings").join("config.json");
-    if let Some(c) = contents {
+/// An editor with the settings editor open in a fresh directory, with
+/// `settings` as the settings file if given. Returns the settings file's path.
+fn open(settings: Option<&str>) -> (Editor, Keymap, PathBuf) {
+    open_with(None, settings)
+}
+
+/// Likewise, with `init` as the init file if given.
+fn open_with(init: Option<&str>, settings: Option<&str>) -> (Editor, Keymap, PathBuf) {
+    let dir = temp_dir("settings");
+    let path = dir.join("settings.scm");
+    if let Some(c) = init {
+        std::fs::write(dir.join("init.scm"), c).unwrap();
+    }
+    if let Some(c) = settings {
         std::fs::write(&path, c).unwrap();
     }
     let mut ed = Editor::new(Buffer::from_str("test", ""));
-    ed.open_settings_at(Some(path.clone()));
+    ed.open_settings_at(Some(dir.join("init.scm")));
     (ed, Keymaps::builtin().settings, path)
+}
+
+/// The init file next to settings file `path`.
+fn init_of(path: &Path) -> PathBuf {
+    path.with_file_name("init.scm")
 }
 
 fn keys(ed: &mut Editor, km: &Keymap, keys: &str) {
@@ -31,8 +45,11 @@ fn s(ed: &Editor) -> &SettingsEditor {
     ed.settings.as_ref().expect("settings editor open")
 }
 
+/// What the settings file sets, as a document.
 fn file(path: &Path) -> Value {
-    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    let l = eval::eval("settings.scm", &std::fs::read_to_string(path).unwrap(), None);
+    assert!(l.warnings.is_empty() && l.only_options(), "{:#?}", l.warnings);
+    eval::document([&l])
 }
 
 #[test]
@@ -52,7 +69,7 @@ fn every_setting_has_a_default_and_a_section() {
 
 #[test]
 fn search_filters_and_modified_filter() {
-    let (mut ed, km, _) = open(Some(r#"{ "editor": { "tab_width": 8 } }"#));
+    let (mut ed, km, _) = open(Some("(setq tab-width 8)"));
     typ(&mut ed, &km, "tab");
     // Title matches first (as a flat list), description matches after.
     let titles: Vec<&str> = s(&ed).matches.iter().map(|&i| SETTINGS[i].title).collect();
@@ -62,11 +79,11 @@ fn search_filters_and_modified_filter() {
     // Terms in any order, matching the description too.
     keys(&mut ed, &km, "C-u");
     typ(&mut ed, &km, "survive daemon");
-    assert!(s(&ed).matches.iter().any(|&i| SETTINGS[i].key == "terminal.backend"));
+    assert!(s(&ed).matches.iter().any(|&i| SETTINGS[i].key == "terminal-backend"));
     keys(&mut ed, &km, "C-u");
     typ(&mut ed, &km, "@modified");
     let keys_: Vec<&str> = s(&ed).matches.iter().map(|&i| SETTINGS[i].key).collect();
-    assert_eq!(keys_, ["editor.tab_width"]);
+    assert_eq!(keys_, ["tab-width"]);
     assert_eq!(s(&ed).rows(), [Row::Header("Text Editor"), Row::Setting(0)]);
     // ESC clears the search first, then closes.
     keys(&mut ed, &km, "ESC");
@@ -78,7 +95,7 @@ fn search_filters_and_modified_filter() {
 
 #[test]
 fn editing_a_number_writes_only_that_key() {
-    let (mut ed, km, path) = open(Some(r#"{ "theme": "ymacs-light", "keymaps": { "global": { "C-z": "undo" } } }"#));
+    let (mut ed, km, path) = open(Some("(setq theme 'ymacs-light)"));
     typ(&mut ed, &km, "fill column");
     keys(&mut ed, &km, "RET");
     assert_eq!(s(&ed).edit, Some(Edit::Text { input: "70".into(), error: None }));
@@ -95,15 +112,12 @@ fn editing_a_number_writes_only_that_key() {
     keys(&mut ed, &km, "RET");
     assert_eq!(s(&ed).edit, None);
     assert!(s(&ed).changed);
-    assert!(s(&ed).is_modified("editor.fill_column"));
-    // The rest of the file is untouched and keeps its order.
+    assert!(s(&ed).is_modified("fill-column"));
+    // The rest of the file is kept.
     let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.find("\"theme\"").unwrap() < text.find("\"keymaps\"").unwrap(), "{text}");
-    let v = file(&path);
-    assert_eq!(v["editor"]["fill_column"], 80);
-    assert_eq!(v["keymaps"]["global"]["C-z"], "undo");
+    assert!(text.contains("\n(setq fill-column 80)\n(setq theme 'ymacs-light)\n"), "{text}");
     // And the configuration reads it.
-    let c = Config::load_from(Some(path.clone()));
+    let c = Config::load_from(Some(init_of(&path)));
     assert!(c.warnings.is_empty(), "{:#?}", c.warnings);
     assert_eq!(c.modes.settings.fill_column, 80);
 }
@@ -148,14 +162,14 @@ fn toggles_choices_lists_and_nulls() {
     keys(&mut ed, &km, "C-u");
     typ(&mut ed, &km, "terminal shell");
     let sel = s(&ed).selected_setting().unwrap().key;
-    assert_eq!(sel, "terminal.shell");
+    assert_eq!(sel, "terminal-shell");
     keys(&mut ed, &km, "RET");
     typ(&mut ed, &km, "/bin/zsh");
     keys(&mut ed, &km, "RET");
     assert_eq!(file(&path)["terminal"]["shell"], "/bin/zsh");
     keys(&mut ed, &km, "RET C-u RET");
     assert_eq!(file(&path)["terminal"]["shell"], Value::Null);
-    let c = Config::load_from(Some(path.clone()));
+    let c = Config::load_from(Some(init_of(&path)));
     assert!(c.warnings.is_empty(), "{:#?}", c.warnings);
     assert_eq!(c.terminal.shell_args, ["-l", "-i"]);
     assert!(!c.session.restore_session);
@@ -163,11 +177,10 @@ fn toggles_choices_lists_and_nulls() {
 
 #[test]
 fn reset_removes_the_key_and_empty_parents() {
-    let (mut ed, km, path) =
-        open(Some(r#"{ "font": { "size": 18 }, "editor": { "tab_width": 2, "fill_column": 90 } }"#));
+    let (mut ed, km, path) = open(Some("(setq font-size 18 tab-width 2 fill-column 90)"));
     typ(&mut ed, &km, "font size");
     keys(&mut ed, &km, "C-k");
-    assert!(!s(&ed).is_modified("font.size"));
+    assert!(!s(&ed).is_modified("font-size"));
     assert_eq!(s(&ed).display(s(&ed).selected_setting().unwrap()), "14");
     keys(&mut ed, &km, "C-u");
     typ(&mut ed, &km, "tab width");
@@ -180,7 +193,7 @@ fn navigation_moves_by_setting_and_section() {
     let (mut ed, km, _) = open(None);
     assert_eq!(s(&ed).selected_section(), Some("Text Editor"));
     keys(&mut ed, &km, "TAB");
-    assert_eq!(s(&ed).selected_setting().unwrap().key, "font.family");
+    assert_eq!(s(&ed).selected_setting().unwrap().key, "font-family");
     keys(&mut ed, &km, "S-TAB S-TAB");
     assert_eq!(s(&ed).selected_section(), Some("Session"));
     keys(&mut ed, &km, "M-<");
@@ -200,25 +213,49 @@ fn navigation_moves_by_setting_and_section() {
 
 #[test]
 fn a_broken_file_is_not_overwritten() {
-    let (mut ed, km, path) = open(Some("{ not json"));
-    assert!(s(&ed).file_error.is_some());
-    typ(&mut ed, &km, "restore session");
-    keys(&mut ed, &km, "RET");
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
-    assert!(s(&ed).message.as_deref().unwrap_or("").contains("settings-open-json"));
-    // Opening the file closes the editor and visits it.
-    keys(&mut ed, &km, "C-o");
-    assert!(ed.settings.is_none());
-    assert_eq!(ed.buf.rope.to_string(), "{ not json");
+    for text in ["(setq fill-column", "(setq fill-column 80)\n(global-set-key \"C-z\" 'undo)\n"] {
+        let (mut ed, km, path) = open(Some(text));
+        assert!(s(&ed).file_error.is_some(), "{text}");
+        typ(&mut ed, &km, "restore session");
+        keys(&mut ed, &km, "RET");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        assert!(s(&ed).message.as_deref().unwrap_or("").contains("settings-open-init-file"));
+        // Opening the init file closes the editor and visits the broken file instead.
+        keys(&mut ed, &km, "C-o");
+        assert!(ed.settings.is_none());
+        assert_eq!(ed.buf.rope.to_string(), text);
+    }
 }
 
 #[test]
-fn open_json_creates_the_file() {
+fn open_init_file_creates_it() {
     let (mut ed, km, path) = open(None);
     keys(&mut ed, &km, "C-o");
     assert!(ed.settings.is_none());
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\n}\n");
-    assert_eq!(ed.buf.path.as_deref().map(|p| p.canonicalize().unwrap()), Some(path.canonicalize().unwrap()));
+    let init = init_of(&path);
+    assert!(std::fs::read_to_string(&init).unwrap().starts_with(";;; init.scm"));
+    assert_eq!(ed.buf.path.as_deref().map(|p| p.canonicalize().unwrap()), Some(init.canonicalize().unwrap()));
+    // The new file is a valid, empty configuration.
+    assert!(Config::load_from(Some(init)).warnings.is_empty());
+}
+
+#[test]
+fn init_file_values_are_the_defaults() {
+    let (mut ed, km, path) = open_with(Some("(setq fill-column 100)"), None);
+    typ(&mut ed, &km, "fill column");
+    let fill = s(&ed).selected_setting().unwrap();
+    assert_eq!((s(&ed).display(fill), s(&ed).default_display(fill)), ("100".into(), "100".into()));
+    assert!(!s(&ed).is_modified("fill-column"));
+    // The settings file wins over the init file...
+    keys(&mut ed, &km, "RET C-u");
+    typ(&mut ed, &km, "80");
+    keys(&mut ed, &km, "RET");
+    assert_eq!(file(&path)["editor"]["fill_column"], 80);
+    assert_eq!(Config::load_from(Some(init_of(&path))).modes.settings.fill_column, 80);
+    // ...and resetting goes back to the init file's value.
+    keys(&mut ed, &km, "C-k");
+    assert_eq!(s(&ed).display(fill), "100");
+    assert_eq!(Config::load_from(Some(init_of(&path))).modes.settings.fill_column, 100);
 }
 
 #[test]
