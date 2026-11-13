@@ -21,6 +21,12 @@ pub fn wait_until(what: &str, timeout: Duration, mut cond: impl FnMut() -> bool)
 /// The default timeout for `wait_until` in tests that involve processes.
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// For waits on megabytes of output: a few seconds on a laptop, several
+/// times that on a shared CI runner, more in debug builds where the daemon
+/// also emulates a terminal for every byte. These waits are about
+/// throughput, not about catching a hang, so they get much longer.
+pub const THROUGHPUT_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// A fresh, empty directory unique to this call, under the system temp dir.
 /// Kept short: Unix socket paths must fit in ~100 bytes on macOS.
 pub fn temp_dir(tag: &str) -> PathBuf {

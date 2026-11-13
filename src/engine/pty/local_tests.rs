@@ -5,12 +5,7 @@ use std::sync::atomic::AtomicUsize;
 
 use super::*;
 use crate::engine::pty::sys::pid_exists;
-use crate::engine::testutil::{TIMEOUT, temp_dir, wait_until};
-
-/// For waits on megabytes of output going through a pty: a few seconds on
-/// a laptop, several times that on a shared CI runner. These waits are about
-/// throughput, not about catching a hang, so they get much longer.
-const THROUGHPUT_TIMEOUT: Duration = Duration::from_secs(60);
+use crate::engine::testutil::{THROUGHPUT_TIMEOUT, TIMEOUT, temp_dir, wait_until};
 
 fn spec(program: &str, args: &[&str]) -> SpawnSpec {
     SpawnSpec { program: program.into(), args: args.iter().map(|a| a.to_string()).collect(), ..Default::default() }
@@ -703,4 +698,31 @@ fn paused_output_is_held_back_and_nothing_is_lost() {
     b.write(other, b"more\n").unwrap();
     b.kill(other).unwrap();
     assert!(b.pause_output(other, false).is_err(), "a killed session is gone");
+}
+
+/// The foreground process follows job control: the shell, then the program
+/// it runs in the foreground, then the shell again.
+#[test]
+fn foreground_process_follows_job_control() {
+    let mut b = backend();
+    let mut seen = Seen::default();
+    assert_eq!(b.next_id(), Some(SessionId(1)));
+    let id = b.spawn(spec("/bin/sh", &["-i"])).unwrap();
+    assert_eq!(b.next_id(), Some(SessionId(id.0 + 1)));
+    wait_until("the shell in front", TIMEOUT, || {
+        seen.drain(&mut b);
+        b.foreground(id).is_some_and(|p| p.name == "sh")
+    });
+    b.write(id, b"sleep 30\n").unwrap();
+    wait_until("sleep in front", TIMEOUT, || {
+        seen.drain(&mut b);
+        b.foreground(id).is_some_and(|p| p.name == "sleep" && p.argv == ["sleep", "30"])
+    });
+    b.write(id, b"\x03").unwrap(); // ^C
+    wait_until("the shell back in front", TIMEOUT, || {
+        seen.drain(&mut b);
+        b.foreground(id).is_some_and(|p| p.name == "sh")
+    });
+    b.kill(id).unwrap();
+    assert_eq!(b.foreground(id), None);
 }

@@ -17,7 +17,7 @@ use super::daemon::{DaemonOptions, HIGH_WATER, bind, parse_args, serve};
 use super::protocol::{ClientMsg, DaemonMsg, MAX_OUTPUT_CHUNK, Op, PROTOCOL_VERSION, Reply, read_frame, write_frame};
 use crate::engine::pty::mock::{MockBackend, MockHandle};
 use crate::engine::pty::{ExitStatus, PtyBackend, PtyEvent, PtySize, SessionId, SpawnSpec, noop_waker};
-use crate::engine::testutil::{TIMEOUT, temp_dir, wait_until};
+use crate::engine::testutil::{THROUGHPUT_TIMEOUT, TIMEOUT, temp_dir, wait_until};
 
 // ---------------------------------------------------------------- harness
 
@@ -154,7 +154,10 @@ fn spawn_write_resize_list_kill() {
     assert!(c.persistent());
     assert_eq!(c.daemon_pid(), std::process::id());
     let id = c.spawn(spec("/bin/sh")).unwrap();
-    assert_eq!(d.mock.session(id).unwrap().spec, spec("/bin/sh"));
+    let spawned = d.mock.session(id).unwrap().spec;
+    assert_eq!(SpawnSpec { env: vec![], ..spawned.clone() }, spec("/bin/sh"));
+    let env: Vec<&str> = spawned.env.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(env, ["YMACS_SOCKET", "YMACS_TERMINAL"], "the daemon's variables are added");
 
     c.write(id, b"ls\r").unwrap();
     c.write(id, b"\xff\x00 raw").unwrap();
@@ -615,7 +618,7 @@ fn a_stalled_client_holds_output_back_without_losing_any() {
     // round trip brings more output.) Everything the daemon sent `a` is in
     // once a request round-trips: its reply is queued behind the output.
     let mut ev = Vec::new();
-    wait_until("the session to be held back with `a` caught up", TIMEOUT, || {
+    wait_until("the session to be held back with `a` caught up", THROUGHPUT_TIMEOUT, || {
         let before = output(&ev, id).len();
         sync(&mut a);
         while let Some(e) = a.try_recv() {
@@ -629,7 +632,12 @@ fn a_stalled_client_holds_output_back_without_losing_any() {
 
     // It goes away: everything arrives, in order.
     drop(stalled);
-    recv_until(&mut a, &mut ev, "all output", |ev| output(ev, id).len() >= total);
+    wait_until("all output", THROUGHPUT_TIMEOUT, || {
+        while let Some(e) = a.try_recv() {
+            ev.push(e);
+        }
+        output(&ev, id).len() >= total
+    });
     let all = output(&ev, id);
     assert_eq!(all.len(), total);
     assert!(all.chunks(chunk.len()).all(|c| c == chunk.as_slice()));
@@ -653,13 +661,13 @@ fn a_stalled_client_does_not_hold_back_other_sessions() {
     for _ in 0..3 * HIGH_WATER / chunk.len() {
         d.mock.output(x, &chunk);
     }
-    wait_until("the stalled session to be held back", TIMEOUT, || d.mock.session(x).unwrap().paused);
+    wait_until("the stalled session to be held back", THROUGHPUT_TIMEOUT, || d.mock.session(x).unwrap().paused);
     d.mock.output(y, b"hello-from-y");
     let mut ev = Vec::new();
     expect_output(&mut b, &mut ev, y, b"hello-from-y");
     assert!(!d.mock.session(y).unwrap().paused);
     drop(stalled);
-    wait_until("the session to flow again", TIMEOUT, || !d.mock.session(x).unwrap().paused);
+    wait_until("the session to flow again", THROUGHPUT_TIMEOUT, || !d.mock.session(x).unwrap().paused);
 }
 
 // ---------------------------------------------------------- binding

@@ -1060,3 +1060,31 @@ fn row_runs_keep_combining_chars_and_blank_leading_spacers() {
     assert_eq!(s.row_runs(1)[0].text, "日");
     assert!(s.row_runs(9).is_empty());
 }
+
+#[test]
+fn bottom_lines_end_at_the_cursor_or_the_last_text() {
+    // A fresh screen: blank rows below the cursor don't count.
+    let t = fed(20, 6, "one\r\ntwo\r\n> ");
+    assert_eq!(t.bottom_lines(2), ["two", ">"]);
+    assert_eq!(t.bottom_lines(10), ["one", "two", ">"]);
+    assert!(t.bottom_lines(0).is_empty());
+    // Text below the cursor (a full-screen UI with a status line) counts.
+    let t = fed(20, 6, "\x1b[6;1Hstatus\x1b[2;1Hprompt");
+    assert_eq!(t.bottom_lines(5), ["prompt", "", "", "", "status"]);
+    // A scrolled-back view is ignored; wide characters read once.
+    let mut t = fed(10, 3, "a\r\nb\r\nc\r\nd\r\n日本");
+    t.scroll(2);
+    assert_eq!(t.bottom_lines(3), ["c", "d", "日本"]);
+    assert_eq!(fed(10, 3, "").bottom_lines(3), [""]);
+}
+
+#[test]
+fn feeding_reports_program_status() {
+    let mut t = term(20, 3);
+    let f = t.feed(b"hi\x1b]7501;state=working:app=claude\x07");
+    assert_eq!(f.status.len(), 1);
+    assert_eq!(f.status[0].state, "working");
+    assert_eq!(rows(&t)[0], "hi");
+    assert!(t.feed(b"\x1b]7501;sta").status.is_empty());
+    assert_eq!(t.feed(b"te=idle\x1b\\").status[0].state, "idle");
+}

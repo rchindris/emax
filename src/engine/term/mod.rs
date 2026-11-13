@@ -10,6 +10,7 @@
 
 pub mod buffer;
 pub mod input;
+pub mod status;
 #[cfg(test)]
 mod tests;
 
@@ -26,6 +27,7 @@ use alacritty_terminal::vte::ansi::{Color, CursorShape as VteCursorShape, Proces
 use serde::Serialize;
 
 use super::theme::{Rgba, Theme};
+use status::{ProgramStatus, StatusScanner};
 
 /// Smallest and largest grid we build: a 1-column grid can't hold a wide
 /// character, and a huge one would only waste memory.
@@ -259,6 +261,8 @@ pub struct Feed {
     pub title: Option<String>,
     /// The bell rang.
     pub bell: bool,
+    /// Program status reports (OSC 7501, see [`status`]), in order.
+    pub status: Vec<ProgramStatus>,
 }
 
 /// Collects what `Term` reports while parsing; drained after each feed.
@@ -346,6 +350,7 @@ pub struct Terminal {
     /// The palette last drawn with: color queries (OSC 4/10/11) are answered
     /// with what the user actually sees.
     palette: RefCell<Palette>,
+    status: StatusScanner,
 }
 
 impl Terminal {
@@ -362,6 +367,7 @@ impl Terminal {
             scrollback,
             title: String::new(),
             palette: RefCell::new(Palette::xterm()),
+            status: StatusScanner::default(),
         }
     }
 
@@ -369,7 +375,7 @@ impl Terminal {
     /// characters may be split across calls.
     pub fn feed(&mut self, bytes: &[u8]) -> Feed {
         self.parser.advance(&mut self.term, bytes);
-        let mut feed = Feed::default();
+        let mut feed = Feed { status: self.status.scan(bytes), ..Feed::default() };
         for event in self.listener.take() {
             match event {
                 TermEvent::PtyWrite(s) => feed.replies.extend_from_slice(s.as_bytes()),
@@ -583,6 +589,33 @@ impl Terminal {
         // A cursor out of view (below a scrolled-back view) still names a row on screen.
         let row = row.clamp(0, grid.screen_lines() as i32 - 1) as usize;
         CursorState { row, col, shape, visible: shown && in_view }
+    }
+
+    /// The bottom of the live screen as text, at most `rows` rows, top to
+    /// bottom (trailing blanks trimmed, wide-character spacers skipped).
+    /// "Bottom" is the lower of the cursor's row and the last row with
+    /// text: blank rows below both (a fresh screen) don't count. Ignores
+    /// any scrolled-back view. For reading what a program shows (agents).
+    pub fn bottom_lines(&self, rows: usize) -> Vec<String> {
+        let grid = self.term.grid();
+        let row_text = |l: usize| {
+            let row = &grid[Line(l as i32)];
+            let mut s = String::new();
+            for c in 0..grid.columns() {
+                let cell = &row[Column(c)];
+                if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                s.push(shown_char(cell.c));
+                s.extend(cell.zerowidth().into_iter().flatten());
+            }
+            s.trim_end().to_string()
+        };
+        let lines: Vec<String> = (0..grid.screen_lines()).map(row_text).collect();
+        let cursor = grid.cursor.point.line.0.max(0) as usize;
+        let last_text = lines.iter().rposition(|l| !l.is_empty()).unwrap_or(0);
+        let end = cursor.max(last_text).min(lines.len().saturating_sub(1)) + 1;
+        lines[end.saturating_sub(rows)..end].to_vec()
     }
 
     /// Scrollback and screen as text (trailing blanks trimmed, wrapped lines

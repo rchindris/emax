@@ -8,6 +8,7 @@
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::path::PathBuf;
 
 use super::ExitStatus;
 
@@ -219,6 +220,95 @@ pub fn signal_group(pid: u32, sig: libc::c_int) {
     }
 }
 
+/// The executable and command line of process `pid` (`None` if it is gone
+/// or not ours to look at). The executable is the file it runs (symlinks
+/// resolved), the command line what it was started with (`argv[0]` may be
+/// the name it was invoked by, e.g. a symlink).
+pub fn process_command(pid: u32) -> Option<(PathBuf, Vec<String>)> {
+    let pid = libc::pid_t::try_from(pid).ok().filter(|&p| p > 0)?;
+    imp::process_command(pid)
+}
+
+#[cfg(target_os = "macos")]
+mod imp {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::PathBuf;
+
+    pub fn process_command(pid: libc::pid_t) -> Option<(PathBuf, Vec<String>)> {
+        let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        // SAFETY: the buffer is as large as we say.
+        let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+        if n <= 0 {
+            return None;
+        }
+        let exe = PathBuf::from(OsStr::from_bytes(&buf[..n as usize]));
+        Some((exe, argv(pid).unwrap_or_default()))
+    }
+
+    /// `KERN_PROCARGS2`: argc (native int), the exec path, NUL padding, then
+    /// argc NUL-terminated arguments (then the environment, not read).
+    fn argv(pid: libc::pid_t) -> Option<Vec<String>> {
+        let mut max: libc::c_int = 0;
+        let mut size = std::mem::size_of::<libc::c_int>();
+        let mut mib = [libc::CTL_KERN, libc::KERN_ARGMAX];
+        // SAFETY: valid mib and an out-parameter of the size given.
+        let r = unsafe { libc::sysctl(mib.as_mut_ptr(), 2, (&raw mut max).cast(), &mut size, std::ptr::null_mut(), 0) };
+        if r != 0 || max <= 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; max as usize];
+        let mut size = buf.len();
+        let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+        // SAFETY: valid mib and a buffer of the size given.
+        let r =
+            unsafe { libc::sysctl(mib.as_mut_ptr(), 3, buf.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0) };
+        if r != 0 {
+            return None;
+        }
+        parse_procargs(&buf[..size])
+    }
+
+    pub(super) fn parse_procargs(buf: &[u8]) -> Option<Vec<String>> {
+        let int = std::mem::size_of::<libc::c_int>();
+        let argc = libc::c_int::from_ne_bytes(buf.get(..int)?.try_into().ok()?);
+        let mut rest = &buf[int..];
+        // Skip the exec path and the padding after it.
+        let path_end = rest.iter().position(|&b| b == 0)?;
+        rest = &rest[path_end..];
+        let start = rest.iter().position(|&b| b != 0)?;
+        rest = &rest[start..];
+        let args = rest
+            .split(|&b| b == 0)
+            .take(argc.max(0) as usize)
+            .map(|a| String::from_utf8_lossy(a).into_owned())
+            .collect();
+        Some(args)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod imp {
+    use std::path::PathBuf;
+
+    pub fn process_command(pid: libc::pid_t) -> Option<(PathBuf, Vec<String>)> {
+        let dir = PathBuf::from(format!("/proc/{pid}"));
+        let exe = std::fs::read_link(dir.join("exe")).ok().or_else(|| {
+            // Not readable (another user's): the 15-character `comm` at least.
+            std::fs::read_to_string(dir.join("comm")).ok().map(|c| PathBuf::from(c.trim_end()))
+        })?;
+        let argv = std::fs::read(dir.join("cmdline"))
+            .map(|b| {
+                b.split(|&c| c == 0)
+                    .filter(|a| !a.is_empty())
+                    .map(|a| String::from_utf8_lossy(a).into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some((exe, argv))
+    }
+}
+
 /// Whether a process with this pid exists (zombies count).
 #[cfg(test)]
 pub fn pid_exists(pid: u32) -> bool {
@@ -285,5 +375,23 @@ mod tests {
         assert!(check_selectable(3).is_ok());
         assert!(check_selectable(libc::FD_SETSIZE as RawFd).is_err());
         assert!(check_selectable(-1).is_err());
+    }
+
+    #[test]
+    fn our_own_command_is_readable() {
+        let (exe, argv) = process_command(std::process::id()).unwrap();
+        assert_eq!(exe, std::env::current_exe().unwrap().canonicalize().unwrap());
+        assert_eq!(argv, std::env::args().collect::<Vec<_>>());
+        assert_eq!(process_command(0), None);
+        assert_eq!(process_command(u32::MAX), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn procargs_are_parsed() {
+        let mut buf = 2i32.to_ne_bytes().to_vec();
+        buf.extend(b"/bin/exe\0\0\0arg0\0arg one\0HOME=/x\0");
+        assert_eq!(imp::parse_procargs(&buf).unwrap(), ["arg0", "arg one"]);
+        assert_eq!(imp::parse_procargs(&[1, 0]), None);
     }
 }

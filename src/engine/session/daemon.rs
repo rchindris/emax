@@ -22,6 +22,15 @@
 //! Other sessions are not affected: one stalled client never stops output
 //! that only other clients are waiting for.
 //!
+//! Screens: the daemon also runs each session's output through a headless
+//! [`Terminal`], so what a program shows can be read with no editor
+//! attached (agents, `ymacs ctl`). That terminal answers the program's
+//! queries (cursor position, device attributes, colors) while no client is
+//! attached; an attached client's own terminal answers them otherwise. It
+//! also picks up OSC 7501 status reports ([`ProgramStatus`]). Every program
+//! is started with `YMACS_SOCKET` (this daemon's socket) and `YMACS_TERMINAL`
+//! (its session id) in its environment.
+//!
 //! The socket's directory is created with mode 0700; a directory owned by
 //! another user (other than root, e.g. `/tmp`) is refused. A lock file next
 //! to the socket makes sure only one daemon serves it; a socket file left by
@@ -42,7 +51,11 @@ use std::time::{Duration, Instant};
 
 use super::protocol::{ClientMsg, DaemonMsg, MAX_OUTPUT_CHUNK, Op, PROTOCOL_VERSION, Reply, encode_frame, read_frame};
 use crate::engine::pty::local::LocalBackend;
-use crate::engine::pty::{ExitStatus, PtyBackend, PtyEvent, PtySize, SessionId, SessionInfo, SpawnSpec, Waker};
+use crate::engine::pty::{
+    ExitStatus, ProcessInfo, PtyBackend, PtyEvent, PtySize, SessionId, SessionInfo, SpawnSpec, Waker,
+};
+use crate::engine::term::Terminal;
+use crate::engine::term::status::ProgramStatus;
 
 /// How a daemon runs.
 #[derive(Clone, Debug, PartialEq)]
@@ -61,6 +74,17 @@ pub const DEFAULT_REPLAY_BYTES: usize = 2 << 20;
 /// Once a client has this many bytes queued, the daemon holds back the
 /// output of the sessions it is attached to until it catches up.
 pub const HIGH_WATER: usize = 8 << 20;
+
+/// Lines of history each session's headless screen keeps.
+pub const SCREEN_SCROLLBACK: usize = 200;
+
+/// Variables every program the daemon starts finds in its environment.
+pub mod env {
+    /// The daemon's socket (for `ymacs ctl` and agent hooks).
+    pub const SOCKET: &str = "YMACS_SOCKET";
+    /// The program's session id.
+    pub const TERMINAL: &str = "YMACS_TERMINAL";
+}
 
 /// Backend events handled before the main loop looks at its channel again.
 const DRAIN_BATCH: usize = 256;
@@ -320,6 +344,7 @@ pub fn serve(
         sessions: BTreeMap::new(),
         conns: HashMap::new(),
         replay_bytes: opts.replay_bytes,
+        socket: bound.path.clone(),
         tx,
         more: true,
         stop: false,
@@ -361,6 +386,31 @@ struct Session {
     clients: BTreeSet<u64>,
     /// Its output is held back (an attached client is too far behind).
     paused: bool,
+    /// What it shows (fed with all of its output).
+    screen: Terminal,
+    /// Its last OSC 7501 report, unless that cleared it.
+    status: Option<ProgramStatus>,
+}
+
+impl Session {
+    fn new(spec: SpawnSpec, ring: Ring) -> Self {
+        let size = spec.size;
+        Session {
+            screen: Terminal::new(size.cols, size.rows, SCREEN_SCROLLBACK),
+            spec,
+            size,
+            ring,
+            exited: None,
+            clients: BTreeSet::new(),
+            paused: false,
+            status: None,
+        }
+    }
+
+    fn set_size(&mut self, size: PtySize) {
+        self.size = size;
+        self.screen.resize(size.cols, size.rows);
+    }
 }
 
 struct Daemon {
@@ -368,6 +418,8 @@ struct Daemon {
     sessions: BTreeMap<SessionId, Session>,
     conns: HashMap<u64, Conn>,
     replay_bytes: usize,
+    /// Where it listens (given to programs as `YMACS_SOCKET`).
+    socket: PathBuf,
     /// For waking itself (to continue a long drain after other inputs).
     tx: Sender<Input>,
     /// The backend may have events waiting.
@@ -559,7 +611,7 @@ impl Daemon {
             }
             Op::Resize { id, size } => {
                 let s = self.sessions.get_mut(&id).ok_or_else(|| no_session(id))?;
-                s.size = size;
+                s.set_size(size);
                 if s.exited.is_some() {
                     return Ok(Reply::Ok);
                 }
@@ -578,14 +630,20 @@ impl Daemon {
     }
 
     fn spawn(&mut self, conn: u64, spec: SpawnSpec) -> Result<Reply, String> {
-        let id = self.backend.spawn(spec.clone()).map_err(|e| format!("{}: {e}", spec.program))?;
-        let size = spec.size;
-        let mut clients = BTreeSet::new();
-        clients.insert(conn);
-        self.sessions.insert(
-            id,
-            Session { spec, size, ring: Ring::new(self.replay_bytes), exited: None, clients, paused: false },
-        );
+        let mut run = spec.clone();
+        let mut set = |k: &str, v: String| {
+            run.env.retain(|(name, _)| name != k);
+            run.env.push((k.to_string(), v));
+        };
+        set(env::SOCKET, self.socket.display().to_string());
+        if let Some(next) = self.backend.next_id() {
+            set(env::TERMINAL, next.0.to_string());
+        }
+        let id = self.backend.spawn(run).map_err(|e| format!("{}: {e}", spec.program))?;
+        debug_assert!(self.backend.next_id().is_none_or(|n| n.0 == id.0 + 1), "YMACS_TERMINAL predicted wrong");
+        let mut s = Session::new(spec, Ring::new(self.replay_bytes));
+        s.clients.insert(conn);
+        self.sessions.insert(id, s);
         Ok(Reply::Spawned(id))
     }
 
@@ -594,7 +652,7 @@ impl Daemon {
     fn attach(&mut self, conn: u64, id: SessionId, size: PtySize) -> Result<Reply, String> {
         let s = self.sessions.get_mut(&id).ok_or_else(|| no_session(id))?;
         s.clients.insert(conn);
-        s.size = size;
+        s.set_size(size);
         let replay = s.ring.chunks(MAX_OUTPUT_CHUNK);
         let exited = s.exited.clone();
         for chunk in replay {
@@ -641,6 +699,37 @@ impl Daemon {
             .collect()
     }
 
+    /// The bottom `rows` rows of session `id`'s screen (see
+    /// [`Terminal::bottom_lines`]).
+    #[allow(dead_code)] // first used by the agent layer
+    pub(crate) fn screen(&self, id: SessionId, rows: usize) -> Option<Vec<String>> {
+        Some(self.sessions.get(&id)?.screen.bottom_lines(rows))
+    }
+
+    /// The process in the foreground of session `id`'s terminal (`None`
+    /// once it has exited).
+    #[allow(dead_code)] // first used by the agent layer
+    pub(crate) fn foreground(&mut self, id: SessionId) -> Option<ProcessInfo> {
+        if self.sessions.get(&id)?.exited.is_some() {
+            return None;
+        }
+        self.backend.foreground(id)
+    }
+
+    /// A variable session `id` was spawned with (as the client asked; the
+    /// daemon's own `YMACS_*` variables are not included).
+    #[allow(dead_code)] // first used by the agent layer
+    pub(crate) fn spawn_env(&self, id: SessionId, key: &str) -> Option<String> {
+        let spec = &self.sessions.get(&id)?.spec;
+        spec.env.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+    }
+
+    /// The program's last status report (OSC 7501), if it stands.
+    #[allow(dead_code)] // first used by the agent layer
+    pub(crate) fn program_status(&self, id: SessionId) -> Option<&ProgramStatus> {
+        self.sessions.get(&id)?.status.as_ref()
+    }
+
     /// Hold back the output of each session an attached client is too far
     /// behind on, and let the others' flow (the writer wakes the main loop
     /// when a client catches up; a client that goes away is detached).
@@ -683,6 +772,15 @@ impl Daemon {
             PtyEvent::Output(id, data) => {
                 let Some(s) = self.sessions.get_mut(&id) else { return };
                 s.ring.push(&data);
+                let feed = s.screen.feed(&data);
+                if let Some(report) = feed.status.into_iter().last() {
+                    s.status = Some(report).filter(|r| !r.state.is_empty());
+                }
+                // Nobody else will answer the program's queries.
+                if s.clients.is_empty() && !feed.replies.is_empty() && s.exited.is_none() {
+                    let _ = self.backend.write(id, &feed.replies);
+                }
+                let Some(s) = self.sessions.get(&id) else { return };
                 for c in s.clients.clone() {
                     self.send_output(c, id, &data);
                 }
@@ -894,6 +992,7 @@ mod tests {
             sessions: BTreeMap::new(),
             conns: HashMap::new(),
             replay_bytes: 100,
+            socket: PathBuf::from("/run/ymacs.sock"),
             tx,
             more: false,
             stop: false,
@@ -977,5 +1076,108 @@ mod tests {
         assert!(d.sessions[&a].clients.is_empty());
         assert_eq!(d.sessions[&b].clients.iter().copied().collect::<Vec<_>>(), [2]);
         assert_eq!(d.sessions.len(), 2, "sessions outlive their clients");
+    }
+
+    fn spawn(d: &mut Daemon, conn: u64, spec: SpawnSpec) -> SessionId {
+        let Ok(Reply::Spawned(id)) = d.op(conn, Op::Spawn(spec)) else { panic!("spawn failed") };
+        id
+    }
+
+    fn pump(d: &mut Daemon) {
+        d.more = true;
+        d.drain();
+    }
+
+    #[test]
+    fn programs_get_the_socket_and_their_id() {
+        let (b, h) = MockBackend::new();
+        let (mut d, _rx) = daemon(Box::new(b));
+        let _c = conn(&mut d, 1);
+        let spec = SpawnSpec {
+            program: "claude".into(),
+            env: vec![("YMACS_TERMINAL".into(), "spoofed".into()), ("YMACS_AGENT".into(), "codex".into())],
+            ..Default::default()
+        };
+        let a = spawn(&mut d, 1, spec.clone());
+        let b2 = spawn(&mut d, 1, spec);
+        for id in [a, b2] {
+            let env = h.session(id).unwrap().spec.env;
+            let get = |k: &str| env.iter().filter(|(n, _)| n == k).map(|(_, v)| v.as_str()).collect::<Vec<_>>();
+            assert_eq!(get(env::TERMINAL), [id.0.to_string()]);
+            assert_eq!(get(env::SOCKET), ["/run/ymacs.sock"]);
+            assert_eq!(get("YMACS_AGENT"), ["codex"]);
+        }
+        assert_eq!(d.spawn_env(a, "YMACS_AGENT").as_deref(), Some("codex"));
+        assert_eq!(d.spawn_env(a, "NOPE"), None);
+        assert_eq!(d.list()[0].program, "claude", "the listing shows what the client asked for");
+    }
+
+    #[test]
+    fn the_screen_follows_output_and_resizes() {
+        let (b, h) = MockBackend::new();
+        let (mut d, _rx) = daemon(Box::new(b));
+        let _c = conn(&mut d, 1);
+        let id = spawn(&mut d, 1, SpawnSpec { size: PtySize::new(20, 5), ..Default::default() });
+        assert_eq!(d.screen(id, 3).unwrap(), [""]);
+        h.output(id, b"one\r\ntwo\r\nthree\r\n> ");
+        pump(&mut d);
+        assert_eq!(d.screen(id, 2).unwrap(), ["three", ">"]);
+        assert_eq!(d.screen(id, 10).unwrap(), ["one", "two", "three", ">"]);
+        d.op(1, Op::Resize { id, size: PtySize::new(10, 3) }).unwrap();
+        assert_eq!(d.sessions[&id].screen.size(), (10, 3));
+        assert_eq!(d.screen(SessionId(99), 2), None);
+    }
+
+    #[test]
+    fn status_reports_are_kept_until_cleared() {
+        let (b, h) = MockBackend::new();
+        let (mut d, _rx) = daemon(Box::new(b));
+        let _c = conn(&mut d, 1);
+        let id = spawn(&mut d, 1, SpawnSpec::default());
+        assert!(d.program_status(id).is_none());
+        h.output(id, b"x\x1b]7501;state=working:app=claude\x07y\x1b]7501;state=blo");
+        pump(&mut d);
+        assert_eq!(d.program_status(id).unwrap().state, "working");
+        h.output(id, b"cked:app=claude\x1b\\");
+        pump(&mut d);
+        let st = d.program_status(id).unwrap();
+        assert_eq!((st.state.as_str(), st.app.as_deref()), ("blocked", Some("claude")));
+        assert_eq!(d.screen(id, 1).unwrap(), ["xy"], "reports don't show");
+        h.output(id, b"\x1b]7501;state=\x07");
+        pump(&mut d);
+        assert!(d.program_status(id).is_none());
+    }
+
+    /// With no client attached, the daemon's screen answers the program's
+    /// queries; with one attached, it leaves that to the client.
+    #[test]
+    fn queries_are_answered_only_when_nobody_is_attached() {
+        let (b, h) = MockBackend::new();
+        let (mut d, _rx) = daemon(Box::new(b));
+        let _c = conn(&mut d, 1);
+        let id = spawn(&mut d, 1, SpawnSpec::default());
+        h.output(id, b"\x1b[6n");
+        pump(&mut d);
+        assert!(h.input(id).is_empty(), "the attached client answers");
+        d.op(1, Op::Detach { id }).unwrap();
+        h.output(id, b"ab\x1b[6n");
+        pump(&mut d);
+        assert_eq!(h.input(id), b"\x1b[1;3R");
+    }
+
+    #[test]
+    fn the_foreground_process_comes_from_the_backend() {
+        let (b, h) = MockBackend::new();
+        let (mut d, _rx) = daemon(Box::new(b));
+        let _c = conn(&mut d, 1);
+        let id = spawn(&mut d, 1, SpawnSpec::default());
+        assert_eq!(d.foreground(id), None);
+        let p = ProcessInfo { pid: 42, name: "claude".into(), ..Default::default() };
+        h.set_foreground(id, Some(p.clone()));
+        assert_eq!(d.foreground(id), Some(p));
+        h.exit(id, ExitStatus::default());
+        pump(&mut d);
+        assert_eq!(d.foreground(id), None, "nothing in front of an exited session");
+        assert_eq!(d.foreground(SessionId(99)), None);
     }
 }

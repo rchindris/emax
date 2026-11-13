@@ -80,19 +80,39 @@ registered requests the main loop resolves when an event satisfies them.
   Fine for the daemon, which starts once; the editor should create its
   engine lazily.
 
-## M1 — Screens and process facts in the daemon
+## M1 — Screens and process facts in the daemon — done
 
-- Per session the daemon keeps a headless `term::Terminal` (the engine's
-  existing emulator), fed with every output chunk and resized with the
-  session. Cost: one emulator per session; alacritty's parser is fast.
+- Per session the daemon keeps a headless `term::Terminal` (200 lines of
+  history), fed with every output chunk and resized with the session.
+  `Terminal::bottom_lines(n)` reads the live bottom as text: it ends at the
+  lower of the cursor and the last row with text, so a fresh screen's blank
+  rows don't count. Cost: ~144 MB/s of text in release, so the PTY stays the
+  bottleneck. Debug builds are ~8× slower (alacritty's generic grid code is
+  compiled into our unoptimised crate); the daemon's megabyte-sized tests
+  wait with `THROUGHPUT_TIMEOUT`.
+- While **no client is attached**, the daemon's terminal answers the
+  program's queries (DSR, DA, colors), so a program started headless
+  doesn't hang waiting for a cursor position. An attached client's own
+  terminal answers them otherwise; there is never more than one answer.
 - **OSC 7501** (Herdr's open "Program Status Protocol"): `ESC ] 7501 ;
-  state=<s>[:app=<name>][:...] (BEL | ESC \)`. A small scanner in
-  `Terminal::feed` (state carried across chunk boundaries) reports them in
-  `Feed.status`. A program that reports its own status needs no rules.
-- **Foreground process**: `tcgetpgrp` on the master, then the process name
-  (`proc_pidpath` on macOS, `/proc/<pid>/comm` on Linux), in `pty/sys.rs`.
-  `HERDR_AGENT`-style override: `YMACS_AGENT=<kind>` in the spawn env.
-- Env set in every terminal: `YMACS_SOCKET`, `YMACS_TERMINAL=<session id>`.
+  state=<s>[:app=<name>][:...] (BEL | ESC \)`. `term::status::StatusScanner`
+  scans the raw bytes, keeping state across chunks, and `Terminal::feed`
+  reports what it finds in `Feed.status`. The daemon keeps the last report
+  per session; an empty `state` clears it.
+- **Foreground process**: `PtyBackend::foreground(id) -> ProcessInfo { pid,
+  name, exe, argv }`. It uses `tcgetpgrp` on the master, then the executable
+  (`proc_pidpath` on macOS, `/proc/<pid>/exe` on Linux) and the command line
+  (`KERN_PROCARGS2` or `/proc/<pid>/cmdline`). `name` is what the process was
+  invoked as (argv[0]'s file name), because Claude Code's executable is a
+  versioned file behind a `claude` symlink; for `node …/codex`, scripts
+  look at `argv`. The local backend implements it; others answer `None`.
+- Env set in every daemon program: `YMACS_SOCKET` and `YMACS_TERMINAL=<session
+  id>`. The id comes from `PtyBackend::next_id()`, predicted before the spawn
+  (the main loop is single-threaded) and checked after it by a debug
+  assertion. `YMACS_AGENT=<kind>` in the client's spawn env is the manual
+  override M2 will honour.
+- `Daemon::{screen, foreground, spawn_env, program_status}` are what M2's
+  `Host` implementation is built on.
 
 ## M2 — Agent layer (daemon) and `agents.scm`
 

@@ -100,6 +100,35 @@ pub struct SessionInfo {
     pub exited: Option<ExitStatus>,
 }
 
+/// The process in the foreground of a terminal: the one the terminal's input
+/// goes to (the shell, or the program it is running).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessInfo {
+    pub pid: u32,
+    /// What it was invoked as: the file name of `argv[0]` (`claude` for a
+    /// symlink to a versioned binary), else of the executable.
+    pub name: String,
+    /// The file it runs, symlinks resolved.
+    pub exe: PathBuf,
+    /// Its command line (empty if not readable).
+    pub argv: Vec<String>,
+}
+
+impl ProcessInfo {
+    /// Look up process `pid` (`None` if it is gone).
+    pub fn of(pid: u32) -> Option<Self> {
+        let (exe, argv) = sys::process_command(pid)?;
+        let base = |s: &std::path::Path| s.file_name().map(|n| n.to_string_lossy().into_owned());
+        let name = argv
+            .first()
+            .and_then(|a| base(std::path::Path::new(a.trim_start_matches('-'))))
+            .filter(|n| !n.is_empty())
+            .or_else(|| base(&exe))
+            .unwrap_or_default();
+        Some(Self { pid, name, exe, argv })
+    }
+}
+
 /// Called (from any thread) when a backend has events to read.
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
@@ -140,6 +169,17 @@ pub trait PtyBackend {
     fn list(&mut self) -> io::Result<Vec<SessionInfo>>;
     /// The next event, if one is waiting. Never blocks.
     fn try_recv(&mut self) -> Option<PtyEvent>;
+    /// The process in the foreground of session `id`'s terminal, if the
+    /// backend can tell (it owns the PTY and the session is running).
+    fn foreground(&mut self, id: SessionId) -> Option<ProcessInfo> {
+        let _ = id;
+        None
+    }
+    /// The id the next successful [`PtyBackend::spawn`] will return, if the
+    /// backend can tell (the daemon puts it in the program's environment).
+    fn next_id(&self) -> Option<SessionId> {
+        None
+    }
     /// Whether sessions survive the editor exiting (the daemon backend).
     fn persistent(&self) -> bool {
         false
@@ -193,6 +233,14 @@ mod tests {
         notifier.clear();
         other.notify();
         assert_eq!(n.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn process_info_names_what_was_invoked() {
+        let me = ProcessInfo::of(std::process::id()).unwrap();
+        let argv0 = std::env::args().next().unwrap();
+        assert_eq!(me.name, std::path::Path::new(&argv0).file_name().unwrap().to_string_lossy());
+        assert!(!me.argv.is_empty());
     }
 
     #[test]

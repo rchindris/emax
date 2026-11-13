@@ -38,7 +38,9 @@ use std::time::{Duration, Instant};
 use portable_pty::{CommandBuilder, MasterPty, native_pty_system};
 
 use super::sys::{self, Cancel, Ready};
-use super::{ExitStatus, Notifier, PtyBackend, PtyEvent, PtySize, SessionId, SessionInfo, SpawnSpec, Waker};
+use super::{
+    ExitStatus, Notifier, ProcessInfo, PtyBackend, PtyEvent, PtySize, SessionId, SessionInfo, SpawnSpec, Waker,
+};
 
 /// Bytes per read (and so the largest `Output` chunk).
 const READ_CHUNK: usize = 64 * 1024;
@@ -626,6 +628,15 @@ impl PtyBackend for LocalBackend {
                 exited: s.shared.lock().exit.clone(),
             })
             .collect())
+    }
+
+    fn foreground(&mut self, id: SessionId) -> Option<ProcessInfo> {
+        let pid = self.sessions.get(&id)?.master.as_ref()?.process_group_leader()?;
+        ProcessInfo::of(u32::try_from(pid).ok()?)
+    }
+
+    fn next_id(&self) -> Option<SessionId> {
+        Some(SessionId(self.next_id + 1))
     }
 
     fn try_recv(&mut self) -> Option<PtyEvent> {

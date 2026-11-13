@@ -7,7 +7,8 @@ use std::io;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use super::{
-    ExitStatus, Notifier, PtyBackend, PtyEvent, PtySize, SessionId, SessionInfo, SpawnSpec, Waker, noop_waker,
+    ExitStatus, Notifier, ProcessInfo, PtyBackend, PtyEvent, PtySize, SessionId, SessionInfo, SpawnSpec, Waker,
+    noop_waker,
 };
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -22,6 +23,8 @@ pub struct MockSession {
     pub resizes: Vec<PtySize>,
     /// Output held back (`pause_output`): its events stay queued.
     pub paused: bool,
+    /// What `foreground` reports.
+    pub foreground: Option<ProcessInfo>,
 }
 
 #[derive(Default)]
@@ -113,6 +116,13 @@ impl MockHandle {
         self.session(id).map(|s| s.input).unwrap_or_default()
     }
 
+    /// Make `foreground` report `p` for session `id`.
+    pub fn set_foreground(&self, id: SessionId, p: Option<ProcessInfo>) {
+        if let Some(s) = self.lock().sessions.get_mut(&id) {
+            s.foreground = p;
+        }
+    }
+
     pub fn fail_next_spawn(&self, msg: &str) {
         self.lock().fail_spawn = Some(msg.to_string());
     }
@@ -139,6 +149,14 @@ impl PtyBackend for MockBackend {
         let size = spec.size;
         st.sessions.insert(id, MockSession { spec, size, attached: true, ..Default::default() });
         Ok(id)
+    }
+
+    fn foreground(&mut self, id: SessionId) -> Option<ProcessInfo> {
+        self.handle.lock().sessions.get(&id).filter(|s| s.exited.is_none())?.foreground.clone()
+    }
+
+    fn next_id(&self) -> Option<SessionId> {
+        Some(SessionId(self.handle.lock().next_id + 1))
     }
 
     fn attach(&mut self, id: SessionId, size: PtySize) -> io::Result<()> {
