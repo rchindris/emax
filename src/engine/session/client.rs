@@ -571,14 +571,14 @@ mod tests {
             greet(&mut s);
             let _ = read_frame::<ClientMsg>(&mut s);
         });
-        let c = DaemonBackend::connect_or_start_with(Path::new("/nonexistent/emax"), &socket, 10, None, noop_waker())
+        let c = DaemonBackend::connect_or_start_with(Path::new("/nonexistent/ymacs"), &socket, 10, None, noop_waker())
             .unwrap();
         drop(c);
         t.join().unwrap();
 
         // Nobody is listening and the program can't be run.
         let missing = dir.join("none.sock");
-        let e = DaemonBackend::connect_or_start_with(Path::new("/nonexistent/emax"), &missing, 10, None, noop_waker())
+        let e = DaemonBackend::connect_or_start_with(Path::new("/nonexistent/ymacs"), &missing, 10, None, noop_waker())
             .err()
             .unwrap();
         assert_eq!(e.kind(), io::ErrorKind::NotFound);

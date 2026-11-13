@@ -781,18 +781,18 @@ fn modes_config_problems_are_reported() {
 #[test]
 fn load_theme_previews_loads_and_cancels() {
     let mut x = t("|text");
-    x.ed.themes = vec![("emax-dark".into(), true), ("emax-light".into(), false), ("solarized-light".into(), false)];
-    x.ed.active_theme = "emax-dark".into();
+    x.ed.themes = vec![("ymacs-dark".into(), true), ("ymacs-light".into(), false), ("solarized-light".into(), false)];
+    x.ed.active_theme = "ymacs-dark".into();
     x.keys("M-x").typ("load-theme").keys("RET");
     // Opens on the theme on screen, which previews unchanged.
     let p = x.ed.picker.as_ref().unwrap();
-    assert_eq!(p.selected_candidate().unwrap().label, "emax-dark");
+    assert_eq!(p.selected_candidate().unwrap().label, "ymacs-dark");
     assert!(p.selected_candidate().unwrap().current);
     assert_eq!(p.selected_candidate().unwrap().annotation, "dark");
-    assert_eq!(x.ed.theme_preview(), Some(ThemeRequest::Named("emax-dark".into())));
+    assert_eq!(x.ed.theme_preview(), Some(ThemeRequest::Named("ymacs-dark".into())));
     // Moving previews; cancelling loads nothing.
     x.keys("C-n");
-    assert_eq!(x.ed.theme_preview(), Some(ThemeRequest::Named("emax-light".into())));
+    assert_eq!(x.ed.theme_preview(), Some(ThemeRequest::Named("ymacs-light".into())));
     x.keys("C-g");
     assert!(x.ed.picker.is_none() && x.ed.theme_request.is_none() && x.ed.theme_preview().is_none());
     // Filtering and RET loads the theme.

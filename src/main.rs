@@ -1,4 +1,4 @@
-//! emax — a fast, modern Emacs-style editor (prototype).
+//! ymacs — a fast, modern Emacs-style editor (prototype).
 
 mod ui;
 
@@ -8,10 +8,10 @@ use std::time::Instant;
 
 use gpui::{App, Application, Bounds, Focusable, WindowBounds, WindowOptions, prelude::*, px, size};
 
-use emax::engine::{Buffer, Config, Editor, config, session};
+use ymacs::engine::{Buffer, Config, Editor, config, session};
 
 const SCRATCH: &str = ";; This buffer is for text that is not saved.
-;; emax — GPU-rendered, rope-backed, Emacs keys. Option is Meta, Cmd is Super.
+;; ymacs — GPU-rendered, rope-backed, Emacs keys. Option is Meta, Cmd is Super.
 ;;
 ;; Motion     C-f C-b M-f M-b C-n C-p C-a C-e M-m M-a M-e M-{ M-}
 ;;            C-M-f C-M-b C-M-u C-M-d  M-< M->  C-v M-v  C-l
@@ -32,7 +32,7 @@ const SCRATCH: &str = ";; This buffer is for text that is not saved.
 ;; Commands   M-x  run any command by name (fuzzy), e.g. rust-mode, auto-fill-mode
 ;; Modes      C-x C-q read-only   <insert> overwrite   M-x <mode> to switch or toggle
 ;;
-;; Run `emax <file>...` to open files.
+;; Run `ymacs <file>...` to open files.
 
 Paragraphs are separated by blank lines. Sentences end with a period,
 question mark or exclamation point.  Try M-e, M-a, M-} and M-q here.
@@ -56,7 +56,7 @@ fn main() {
     let t_open = Instant::now();
     let config = Config::load();
     for w in &config.warnings {
-        eprintln!("emax: config: {w}");
+        eprintln!("ymacs: config: {w}");
     }
     let mut ed = Editor::new(Buffer::from_str("*scratch*", SCRATCH));
     // Like Emacs, there is always a *scratch* buffer; files keep command-line
@@ -64,7 +64,7 @@ fn main() {
     for p in paths.iter().rev() {
         let r = if p.is_dir() { ed.dired(p) } else { ed.find_file(p) };
         if let Err(e) = r {
-            eprintln!("emax: {e}");
+            eprintln!("ymacs: {e}");
             std::process::exit(1)
         }
     }
@@ -87,7 +87,7 @@ fn main() {
     });
     // The last session comes back when no files were named, and is saved on quit.
     if let Some(e) = ed.startup_session(session_file, !paths.is_empty(), !config.warnings.is_empty()) {
-        eprintln!("emax: session: {e}");
+        eprintln!("ymacs: session: {e}");
     }
     let keymaps = config.keymaps;
     let appearance = config.appearance;
@@ -98,7 +98,7 @@ fn main() {
         let window = cx
             .open_window(
                 WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() },
-                |window, cx| cx.new(|cx| ui::EmaxView::new(ed, keymaps, appearance, window, cx)),
+                |window, cx| cx.new(|cx| ui::YmacsView::new(ed, keymaps, appearance, window, cx)),
             )
             .unwrap();
         window

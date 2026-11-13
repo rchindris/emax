@@ -62,8 +62,8 @@ Allowed cross-area touch points (already wired — do not move them):
 | `Editor::kill_buffer` | `layout.replace_buffer`, `terminal_buffer_killed`, emit `BufferKilled` | foundation (done) |
 | `Editor::active_keymaps` | puts `terminal_config.keymap` first in terminal buffers | foundation (done) |
 | `Editor::tick` | `poll_pty()` → `run_timers` → `run_hooks` | term implements `poll_pty` |
-| `EmaxView::handle_key` | `if !keys.is_pending() && ed.terminal_key(&key)` | term implements `terminal_key` |
-| `EmaxView::render` | `ed.terminal_snapshot`, `ed.resize_terminal`, `term_view::render_terminal` | windows moves it into the per-window render; term implements |
+| `YmacsView::handle_key` | `if !keys.is_pending() && ed.terminal_key(&key)` | term implements `terminal_key` |
+| `YmacsView::render` | `ed.terminal_snapshot`, `ed.resize_terminal`, `term_view::render_terminal` | windows moves it into the per-window render; term implements |
 | `main.rs` | `--pty-daemon` → `session::daemon::main` | persistence |
 
 Merge order for the integrator: **pty → term → windows → persistence**
@@ -71,20 +71,20 @@ Merge order for the integrator: **pty → term → windows → persistence**
 
 ## 2. Threading model
 
-- The GPUI main thread owns `EmaxView`, which owns the `Editor`. `Editor`
+- The GPUI main thread owns `YmacsView`, which owns the `Editor`. `Editor`
   is not `Send` (hook handlers are `Rc`), and nothing engine-side needs it to
   be.
 - A `PtyBackend` does blocking I/O on its own threads (reader per session,
   or one socket reader for the daemon client) and passes events through an
   internal channel. `try_recv` never blocks.
 - Waking the UI: `Editor.waker: pty::Waker = Arc<dyn Fn() + Send + Sync>`.
-  The view installs one in `EmaxView::new` (an unbounded futures channel;
-  a foreground task drains it and calls `EmaxView::tick`). Backends are
+  The view installs one in `YmacsView::new` (an unbounded futures channel;
+  a foreground task drains it and calls `YmacsView::tick`). Backends are
   created lazily by `Editor::pty_backend()` with `self.waker.clone()`.
   Backends wrap the waker in a `pty::Notifier`, so it is called once per
   batch: producers `notify()` after queueing; `try_recv` calls `clear()`
   when it finds the queue empty (i.e. before the consumer stops draining).
-- `EmaxView::tick` calls `Editor::tick(Instant::now())`, which runs
+- `YmacsView::tick` calls `Editor::tick(Instant::now())`, which runs
   `poll_pty()` (drain backend events into terminals), fires due timers and
   drains the hook queue; it redraws if anything happened, then re-arms a
   GPUI timer for `hooks.next_deadline()`. Keys also re-arm it.
@@ -387,7 +387,7 @@ sessions in parallel.
 
 ## 7. Session persistence — `src/engine/session/` (persistence builder)
 
-### 7.1 Daemon (`session/daemon.rs`, `emax --pty-daemon`)
+### 7.1 Daemon (`session/daemon.rs`, `ymacs --pty-daemon`)
 
 - `run(DaemonOptions { socket, replay_bytes, idle_exit })` binds a
   `UnixListener` (parent dir created with mode 0700; a stale socket file
@@ -427,7 +427,7 @@ Handshake first (version mismatch → daemon closes). `req == 0` = no reply
 replay_bytes, waker)` starts `current_exe() --pty-daemon --socket ..
 --replay-bytes ..` if connecting fails, then polls `connect` for up to 5 s.
 Add `connect_or_start_with(program: &Path, ..)` for tests (integration
-tests use `env!("CARGO_BIN_EXE_emax")`; unit tests run `daemon::run` in a
+tests use `env!("CARGO_BIN_EXE_ymacs")`; unit tests run `daemon::run` in a
 thread on a `temp_dir` socket). A reader thread turns `Output`/`Exited` into
 `PtyEvent`s (with a `Notifier`) and routes `Reply`s to the waiting request
 (blocking with a timeout, e.g. 5 s → `TimedOut`). `persistent() == true`.
@@ -493,10 +493,10 @@ Parsed into `Config.terminal: TerminalConfig` (with `keymap`) and
 `Config.session: SessionConfig`, installed with
 `Editor::set_terminal_config(Arc<..>)` / `Editor.session_config` in
 `main.rs`. Environment overrides (they win over the configuration):
-`EMAX_PTYD_SOCKET` (daemon socket, else `terminal.socket`, else
-`$TMPDIR/emax-$UID/ptyd.sock`: `session::socket_path`) and `EMAX_STATE_DIR`
-(state dir, else `session.state_dir`, else `$XDG_STATE_HOME/emax`, else
-`~/.local/state/emax`: `session::state_dir`).
+`YMACS_PTYD_SOCKET` (daemon socket, else `terminal.socket`, else
+`$TMPDIR/ymacs-$UID/ptyd.sock`: `session::socket_path`) and `YMACS_STATE_DIR`
+(state dir, else `session.state_dir`, else `$XDG_STATE_HOME/ymacs`, else
+`~/.local/state/ymacs`: `session::state_dir`).
 
 ## 9. Key bindings (in place, `keymaps.global`)
 
@@ -510,7 +510,7 @@ in char-mode terminals). Terminal keys: §5.
 - `Editor::exit()`: runs the `kill-emacs` hooks once if
   `save-buffers-kill-terminal` has not already (sets `quit_requested`). The
   view calls it when the window closes and when the app quits, so the
-  session is saved however emax ends.
+  session is saved however ymacs ends.
 
 ### Windows (`src/engine/window/` = `mod.rs`, `tree.rs`, `ops.rs`, `tests.rs`)
 - Public paths unchanged: `window::{Layout, Node, Window, Tab, Rect, WindowId,
@@ -581,7 +581,7 @@ in char-mode terminals). Terminal keys: §5.
   and `connect_or_start_with(program, socket, replay_bytes, idle_exit, waker)`;
   also `daemon_pid`, `is_connected`, `shutdown`, `set_reply_timeout`.
 - Config: `terminal.daemon_idle_exit` (seconds, default 60, 0 = never) for
-  daemons the editor starts. CLI: `emax --pty-daemon [--socket PATH]
+  daemons the editor starts. CLI: `ymacs --pty-daemon [--socket PATH]
   [--replay-bytes N] [--idle-exit SECS] [--foreground]`; exit codes
   `exit_code::{OK 0, ERROR 1, USAGE 2, IN_USE 3}`. The socket path is made
   absolute before detaching.
@@ -605,8 +605,8 @@ in char-mode terminals). Terminal keys: §5.
   backend created during restore (before the view exists) still wakes it.
   `set_waker` calls the new waker once: a replay that arrived before it was
   installed woke the old one, and the backend wakes only once per batch.
-- Restore and save happen only when emax starts with no files, so
-  `emax file` neither restores nor overwrites the saved workspace
+- Restore and save happen only when ymacs starts with no files, so
+  `ymacs file` neither restores nor overwrites the saved workspace
   (`Editor::startup_session`).
 
 ### Tests across subsystems

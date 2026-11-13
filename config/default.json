@@ -25,9 +25,9 @@
     "ui_size": null,
     "line_height": 1.5
   },
-  "theme": "emax-dark",
+  "theme": "ymacs-dark",
   "themes": {
-    "emax-dark": {
+    "ymacs-dark": {
       "background": "#1e1f22",
       "foreground": "#d4d7dd",
       "emphasis": "#ffffff",
@@ -84,7 +84,7 @@
       "syntax.string.special.key": "#e06c75",
       "syntax.punctuation": "#abb2bf"
     },
-    "emax-light": {
+    "ymacs-light": {
       "background": "#fafafa",
       "foreground": "#383a42",
       "emphasis": "#000000",

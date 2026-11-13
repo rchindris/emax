@@ -262,9 +262,9 @@ fn resize_sends_sigwinch() {
 fn environment_defaults_overrides_and_inheritance() {
     let mut b = backend();
     let mut seen = Seen::default();
-    let script = r#"printf '%s|%s|%s|%s\n' "$TERM" "$COLORTERM" "$EMAX_TEST_VAR" "${PATH:+path}""#;
+    let script = r#"printf '%s|%s|%s|%s\n' "$TERM" "$COLORTERM" "$YMACS_TEST_VAR" "${PATH:+path}""#;
     let mut s = sh(script);
-    s.env = vec![("EMAX_TEST_VAR".into(), "héllo wörld".into())];
+    s.env = vec![("YMACS_TEST_VAR".into(), "héllo wörld".into())];
     let a = b.spawn(s).unwrap();
     let mut s = sh(script);
     s.env = vec![("TERM".into(), "dumb".into()), ("COLORTERM".into(), "".into())];
@@ -305,7 +305,7 @@ fn spawn_failures_are_errors_not_panics() {
     let live = b.live_threads();
     let err = b.spawn(spec("/definitely/not/a/program", &[])).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::NotFound, "{err}");
-    let err = b.spawn(spec("emax-no-such-program-on-path", &[])).unwrap_err();
+    let err = b.spawn(spec("ymacs-no-such-program-on-path", &[])).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::NotFound, "{err}");
     assert_eq!(b.spawn(spec("", &[])).unwrap_err().kind(), io::ErrorKind::InvalidInput);
     let dir = temp_dir("notexec");

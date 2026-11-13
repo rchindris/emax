@@ -158,7 +158,7 @@ fn theme_syntax_colors_fall_back_and_merge() {
     assert_eq!(t.syntax_color("function.method"), t.syntax_color("function"));
     assert_eq!(t.syntax_color("keyword.control.flow"), t.syntax_color("keyword"));
     assert_eq!(t.syntax_color("nothing.like.this"), None);
-    let user = r##"{ "themes": { "emax-dark": { "syntax.keyword": "#ff0000", "syntax.function.method": "#00ff00", "syntax.oops": "red" } } }"##;
+    let user = r##"{ "themes": { "ymacs-dark": { "syntax.keyword": "#ff0000", "syntax.function.method": "#00ff00", "syntax.oops": "red" } } }"##;
     let c = Config::from_layers(&[("built-in", DEFAULT_JSON), ("user", user)]);
     assert!(c.warnings.iter().any(|w| w.contains("syntax.oops")), "{:#?}", c.warnings);
     let u = &c.appearance.themes.dark;

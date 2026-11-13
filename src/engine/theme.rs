@@ -20,7 +20,7 @@ pub type Rgba = u32;
 
 /// The theme used when the configured one can't be found, and the one an
 /// incomplete theme without `inherits` takes its missing colors from.
-pub const DEFAULT_THEME: &str = "emax-dark";
+pub const DEFAULT_THEME: &str = "ymacs-dark";
 
 /// The key in a theme that names the theme it builds on.
 const INHERITS: &str = "inherits";
@@ -33,7 +33,7 @@ macro_rules! theme_colors {
         /// Every color the UI draws with.
         #[derive(Clone, Debug, PartialEq)]
         pub struct Theme {
-            /// The theme's name in the config (`emax-dark`, …).
+            /// The theme's name in the config (`ymacs-dark`, …).
             pub name: String,
             $( $(#[doc = $doc])* pub $field: Rgba, )*
             /// Syntax highlighting colors by capture name (`keyword`,

@@ -1,4 +1,4 @@
-//! The session daemon (`emax --pty-daemon`): owns PTY sessions so they
+//! The session daemon (`ymacs --pty-daemon`): owns PTY sessions so they
 //! survive the editor, keeps the last `replay_bytes` of each session's output
 //! in a ring buffer, and serves clients over a Unix socket (see
 //! [`super::protocol`]).
@@ -65,7 +65,7 @@ pub const HIGH_WATER: usize = 8 << 20;
 /// Backend events handled before the main loop looks at its channel again.
 const DRAIN_BATCH: usize = 256;
 
-/// Exit codes of `emax --pty-daemon`.
+/// Exit codes of `ymacs --pty-daemon`.
 pub mod exit_code {
     pub const OK: i32 = 0;
     pub const ERROR: i32 = 1;
@@ -750,7 +750,7 @@ pub fn parse_args(args: &[String]) -> Result<Cli, String> {
     Ok(cli)
 }
 
-/// The `emax --pty-daemon [--socket PATH] [--replay-bytes N]
+/// The `ymacs --pty-daemon [--socket PATH] [--replay-bytes N]
 /// [--idle-exit SECS] [--foreground]` entry point: parse `args`
 /// (everything after `--pty-daemon`), bind the socket, detach from the
 /// terminal (unless `--foreground`) and serve. Returns the process exit code
@@ -759,7 +759,7 @@ pub fn main(args: &[String]) -> i32 {
     let mut cli = match parse_args(args) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("emax --pty-daemon: {e}");
+            eprintln!("ymacs --pty-daemon: {e}");
             return exit_code::USAGE;
         }
     };
@@ -771,21 +771,21 @@ pub fn main(args: &[String]) -> i32 {
     let bound = match bind(&cli.opts.socket) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("emax --pty-daemon: {}: {e}", cli.opts.socket.display());
+            eprintln!("ymacs --pty-daemon: {}: {e}", cli.opts.socket.display());
             return if e.kind() == io::ErrorKind::AddrInUse { exit_code::IN_USE } else { exit_code::ERROR };
         }
     };
     if !cli.foreground {
         let log = cli.opts.socket.with_extension("log");
         if let Err(e) = daemonize(&log) {
-            eprintln!("emax --pty-daemon: detaching: {e}");
+            eprintln!("ymacs --pty-daemon: detaching: {e}");
             return exit_code::ERROR;
         }
     }
     match serve(bound, &cli.opts, |w| Box::new(LocalBackend::new(w))) {
         Ok(()) => exit_code::OK,
         Err(e) => {
-            eprintln!("emax --pty-daemon: {e}");
+            eprintln!("ymacs --pty-daemon: {e}");
             exit_code::ERROR
         }
     }

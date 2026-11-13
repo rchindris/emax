@@ -7,7 +7,7 @@
 
 use gpui::{AnyElement, FontWeight, SharedString, Window, div, font, prelude::*, px, rgba};
 
-use emax::engine::term::{CursorShape, Run, Snapshot};
+use ymacs::engine::term::{CursorShape, Run, Snapshot};
 
 /// Width of a cell for a monospaced font of `font_size` pixels (an
 /// estimate, used until the first render measures the real advance).

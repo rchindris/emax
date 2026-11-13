@@ -1,3 +1,3 @@
-//! emax — a fast, modern Emacs-style editor.
+//! ymacs — a fast, modern Emacs-style editor.
 
 pub mod engine;

@@ -26,7 +26,7 @@ pub const TIMEOUT: Duration = Duration::from_secs(10);
 pub fn temp_dir(tag: &str) -> PathBuf {
     static N: AtomicUsize = AtomicUsize::new(0);
     let n = N.fetch_add(1, Ordering::SeqCst);
-    let d = std::env::temp_dir().join(format!("emax-t{}-{tag}-{n}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("ymacs-t{}-{tag}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).expect("create temp dir");
     d
